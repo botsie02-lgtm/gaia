@@ -1,11 +1,28 @@
 import type { Agent, Deposit, Hearth, Material, Position, Terrain, World } from './model.js';
 import { initialRandomState, random } from './random.js';
+import { EventLedger } from './history/events.js';
+import { applyPracticeOutcome, createSkillRecord } from './skills/index.js';
+import type { SkillConfig } from './skills/index.js';
 
 export const WIDTH = 52;
 export const HEIGHT = 34;
 export const AGENT_COUNT = 14;
 export const CARGO_LIMIT = 3;
 export const HEARTH_COST: Readonly<Record<Material, number>> = { wood: 4, stone: 8 };
+
+/** Illustrative tuning in prototype units; proficiency does not change action rates yet. */
+export const GATHERING_SKILL: SkillConfig = Object.freeze({
+  skillId: 'gathering',
+  failureExperience: 1,
+  successExperience: 2,
+  halfProficiencyExperience: 100,
+  attemptMilestones: Object.freeze([10, 50, 100]),
+});
+
+export interface WorldOptions {
+  readonly eventCapacity?: number;
+  readonly gatheringMilestones?: readonly number[];
+}
 
 export function indexOf(world: World, x: number, y: number): number {
   return y * world.width + x;
@@ -16,7 +33,13 @@ export function passable(world: World, x: number, y: number): boolean {
     world.terrain[indexOf(world, x, y)] !== 'water';
 }
 
-export function createWorld(seed = 12345): World {
+export function createWorld(seed = 12345, options: WorldOptions = {}): World {
+  const gatheringSkillConfig: SkillConfig = Object.freeze({
+    ...GATHERING_SKILL,
+    attemptMilestones: Object.freeze([...(options.gatheringMilestones ?? GATHERING_SKILL.attemptMilestones)]),
+  });
+  // Validate once before generating terrain; each agent gets its own record below.
+  createSkillRecord(gatheringSkillConfig);
   const width = WIDTH;
   const height = HEIGHT;
   const hub = { x: Math.floor(width / 2), y: Math.floor(height / 2) };
@@ -28,7 +51,9 @@ export function createWorld(seed = 12345): World {
     width,
     height,
     terrain: [],
-    hub,
+    hub: { ...hub, id: 0 },
+    history: new EventLedger(options.eventCapacity),
+    gatheringSkillConfig,
     inventory: { wood: 0, stone: 0 },
     agents: [],
     deposits: [],
@@ -59,9 +84,12 @@ export function createWorld(seed = 12345): World {
       energy: 65 + Math.floor(random(world) * 35),
       resting: false,
       cargo: { wood: 0, stone: 0 },
+      skills: { gathering: createSkillRecord(gatheringSkillConfig) },
     };
     world.agents.push(agent);
   }
+  // Allocate after agents so their existing IDs/parity (and decisions) stay unchanged.
+  world.hub.id = world.nextEntityId++;
   return world;
 }
 
@@ -173,9 +201,14 @@ function act(world: World, agent: Agent): void {
   const carrying = cargoCount(agent);
   const atHub = agent.x === world.hub.x && agent.y === world.hub.y;
   if (atHub && carrying > 0) {
-    world.inventory.wood += agent.cargo.wood;
-    world.inventory.stone += agent.cargo.stone;
+    const delivered = agent.cargo;
+    world.inventory.wood += delivered.wood;
+    world.inventory.stone += delivered.stone;
     agent.cargo = { wood: 0, stone: 0 };
+    world.history.append({
+      tick: world.tick, kind: 'stockpile.delivered', actorId: agent.id, targetId: world.hub.id,
+      details: { wood: delivered.wood, stone: delivered.stone, unit: 'prototype-unit' },
+    });
     return;
   }
   if (carrying >= CARGO_LIMIT) {
@@ -196,6 +229,27 @@ function act(world: World, agent: Agent): void {
     agent.energy = Math.max(0, agent.energy - 1);
     if (material === 'wood') world.stats.woodHarvested++;
     else world.stats.stoneHarvested++;
+    world.history.append({
+      tick: world.tick, kind: 'resource.harvested', actorId: agent.id, targetId: deposit.id,
+      details: { material, amount: 1, remaining: deposit.amount, unit: 'prototype-unit' },
+    });
+    if (deposit.amount === 0) {
+      world.history.append({
+        tick: world.tick, kind: 'resource.depleted', actorId: agent.id, targetId: deposit.id,
+        details: { material, remaining: 0, unit: 'prototype-unit' },
+      });
+    }
+    const config = world.gatheringSkillConfig;
+    const update = applyPracticeOutcome(agent.skills.gathering, {
+      skillId: config.skillId, success: true,
+    }, config);
+    agent.skills.gathering = update.record;
+    for (const attempts of update.reachedMilestones) {
+      world.history.append({
+        tick: world.tick, kind: 'skill.milestone', actorId: agent.id,
+        details: { skillId: config.skillId, attempts, proficiency: update.record.proficiency },
+      });
+    }
     return;
   }
   goTo(world, agent, deposit);
@@ -206,12 +260,20 @@ function processHearth(world: World, hearth: Hearth): void {
   if (world.tick % 30 === 0 && hearth.fuel > 0) {
     hearth.fuel--;
     hearth.heat += 25;
+    world.history.append({
+      tick: world.tick, kind: 'hearth.fuel_consumed', targetId: hearth.id,
+      details: { material: 'wood', amount: 1, fuelRemaining: hearth.fuel, unit: 'prototype-unit' },
+    });
   }
   hearth.heat = Math.max(0, hearth.heat - 0.6);
   // An agent can replenish the hearth from the shared inventory.
   if (hearth.fuel < 2 && world.inventory.wood >= 2) {
     world.inventory.wood -= 2;
     hearth.fuel += 2;
+    world.history.append({
+      tick: world.tick, kind: 'hearth.refueled', targetId: hearth.id,
+      details: { stockpileId: world.hub.id, material: 'wood', amount: 2, fuelRemaining: hearth.fuel, unit: 'prototype-unit' },
+    });
   }
 }
 
@@ -225,14 +287,20 @@ export function stepWorld(world: World): void {
       world.inventory.stone >= HEARTH_COST.stone) {
     world.inventory.wood -= HEARTH_COST.wood;
     world.inventory.stone -= HEARTH_COST.stone;
-    world.structures.push({
+    const hearth: Hearth = {
       id: world.nextEntityId++, kind: 'structure', structure: 'hearth',
       x: world.hub.x + 2, y: world.hub.y,
       stoneUsed: HEARTH_COST.stone,
       fuel: HEARTH_COST.wood,
       heat: 0,
-    });
+    };
+    world.structures.push(hearth);
     world.stats.hearthsBuilt++;
+    world.history.append({
+      tick: world.tick, kind: 'structure.built', targetId: hearth.id,
+      details: { structure: hearth.structure, stockpileId: world.hub.id,
+        wood: HEARTH_COST.wood, stone: HEARTH_COST.stone, unit: 'prototype-unit' },
+    });
   }
   for (const hearth of world.structures) processHearth(world, hearth);
   // Remove depleted deposits to avoid accumulating inactive objects.

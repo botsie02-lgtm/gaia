@@ -25,10 +25,10 @@ It has no dependency on World, material/process implementations, rendering or re
   Event IDs are per world, not global. ID exhaustion raises an error rather than
   reusing or rounding IDs.
 
-## Future World integration (not wired in this branch)
+## World integration
 
-The simulation layer should own the ledger and publish an event only after a rule has
-successfully applied its state change. Use the current fixed world tick and stable
+The simulation layer owns one ledger per world and publishes events after rules
+successfully apply their state changes. Use the current fixed world tick and stable
 rule execution order (including order of multiple events in one tick). For example:
 
 ```ts
@@ -42,10 +42,29 @@ ledger.append({
 ```
 
 The example uses current prototype resource units; future material events should
-explicitly name quantities and units (e.g. massKg). Other candidate kinds include
-resource.depleted, structure.built, process.completed and agent.rest.started.
-These are illustrative names, not an enforced vocabulary. Establish a shared
-vocabulary and schemas as integration proceeds.
+explicitly name quantities and units (e.g. massKg). The current world publishes resource.harvested, resource.depleted,
+stockpile.delivered, structure.built, hearth.fuel_consumed, hearth.refueled and
+skill.milestone. All use the current tick. Harvest and depletion identify the
+agent and deposit; delivery identifies the agent and hub. Hearth events identify
+the hearth without inventing an acting agent. Milestones identify the practicing
+agent and report skillId, attempts and proficiency. Amounts are legacy prototype
+units, not kilograms. The hub receives a stable entity ID after the initial
+agents, preserving their existing IDs and resource-choice parity.
+
+`createWorld(seed, { eventCapacity, gatheringMilestones })` optionally overrides
+the default ledger capacity and gathering milestones (10, 50, 100). Each agent
+has an independent gathering record. Each successful one-unit harvest adds one
+practice and 2 XP, using the skills module's saturating curve with half
+proficiency at 100 XP. Moving, resting, delivering and depleted deposits give no
+practice; proficiency does not alter action outcomes yet. Milestones are
+published only on threshold crossings. History and configuration are reset on
+world regeneration.
+
+World JSON snapshots now include ledger snapshot data, gathering configuration,
+per-agent skill records and a hub ID. This is an additive schema change, except
+that newly allocated structure IDs shift by one. JSON parsing alone does not
+restore a live EventLedger; use its fromSnapshot API for the ledger. Full world
+save/load and old snapshot migration remain future work.
 
 Publish semantic transitions instead of every unchanged state or frame. Never pass
 mutable World objects as payloads; use stable IDs and compact facts. World rules

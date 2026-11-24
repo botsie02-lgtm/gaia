@@ -22,10 +22,11 @@ app.innerHTML = `
   </section><aside class="sidebar">
     <section class="panel"><div class="section-label">SIMULATION</div><div id="stats" class="stats"></div></section>
     <section class="panel"><div class="section-label">INSPECTOR</div><div id="inspector" class="inspector">Click a tile to inspect its terrain and entities.</div></section>
+    <section class="panel"><div class="section-label">RECENT EVENTS</div><div id="recent-events" class="inspector">No events yet.</div><p class="small" id="history-count"></p></section>
     <section class="panel"><div class="section-label">RULES IN EFFECT</div><p>Agents choose resources, gather finite deposits, return cargo to the hub, rest when tired, and construct a hearth from wood and stone.</p><p>Once built, the hearth burns wood to generate and lose heat over time.</p><p class="small">This is an abstract material process, not atomic physics or a learned intelligence system yet.</p></section>
     <section class="panel legend"><div class="section-label">LEGEND</div><div><span class="mark wood"></span>Wood <span class="mark stone"></span>Stone <span class="mark agent"></span>Agent <span class="mark hearth"></span>Hearth</div></section>
   </aside></main>
-  <footer>GAIA simulation prototype 0.1 · deterministic fixed-step core · browser is a viewer</footer>`;
+  <footer>GAIA simulation prototype 0.2 · deterministic fixed-step core · browser is a viewer</footer>`;
 
 const get = <T extends HTMLElement>(id: string): T => {
   const element = document.getElementById(id);
@@ -40,6 +41,8 @@ const mode = get<HTMLDivElement>('mode');
 const readout = get<HTMLSpanElement>('readout');
 const stats = get<HTMLDivElement>('stats');
 const inspector = get<HTMLDivElement>('inspector');
+const recentEvents = get<HTMLDivElement>('recent-events');
+const historyCount = get<HTMLParagraphElement>('history-count');
 const speed = get<HTMLSelectElement>('speed');
 const seedInput = get<HTMLInputElement>('seed');
 let world: World = createWorld();
@@ -47,6 +50,28 @@ let running = true;
 let selected: { x: number; y: number } | null = null;
 let lastTime = performance.now();
 let accumulatedMs = 0;
+
+let historyWorld: World | undefined;
+let historyTick = -1;
+
+function renderRecentEvents(): void {
+  // The browser observes history; it never publishes simulation events.
+  if (historyWorld === world && historyTick === world.tick) return;
+  historyWorld = world;
+  historyTick = world.tick;
+  const events = world.history.query().slice(-8).reverse();
+  recentEvents.textContent = events.length === 0 ? 'No events yet.' : events.map(event => {
+    const actor = event.actorId === undefined ? '' : ' actor #' + event.actorId;
+    const target = event.targetId === undefined ? '' : ' target #' + event.targetId;
+    const details = Object.entries(event.details ?? {}).filter(([key]) => key !== 'unit')
+      .map(([key, value]) => key + '=' + (key === 'proficiency' && typeof value === 'number'
+        ? (value * 100).toFixed(1) + '%' : String(value))).join(', ');
+    return '#' + event.eventId + ' · tick ' + event.tick + '\n' + event.kind + actor + target +
+      (details ? '\n' + details : '');
+  }).join('\n\n');
+  historyCount.textContent = 'Latest ' + events.length + ' · retained ' + world.history.size +
+    ' / ' + world.history.capacity + ' · resource amounts in prototype units';
+}
 
 function inspect(): void {
   if (!selected) return;
@@ -58,6 +83,11 @@ function inspect(): void {
   const lines = [`Tile (${x}, ${y}) · ${terrain}`];
   for (const deposit of deposits) lines.push(`${deposit.material} deposit #${deposit.id}: ${deposit.amount} remaining`);
   for (const agent of agents) lines.push(`Settler #${agent.id}: energy ${agent.energy.toFixed(0)}, cargo ${agent.cargo.wood} wood / ${agent.cargo.stone} stone${agent.resting ? ' (resting)' : ''}`);
+  for (const agent of agents) {
+    const skill = agent.skills.gathering;
+    lines.push('  Gathering #' + agent.id + ': ' + (skill.proficiency * 100).toFixed(1) +
+      '% · ' + skill.attempts + ' practices · ' + skill.experience + ' XP');
+  }
   for (const structure of structures) lines.push(`Hearth #${structure.id}: heat ${structure.heat.toFixed(1)}, fuel ${structure.fuel}`);
   if (lines.length === 1) lines.push('No entities on this tile.');
   inspector.textContent = lines.join('\n');
@@ -80,6 +110,7 @@ function render(): void {
     ['Hearth heat', world.structures[0] ? world.structures[0].heat.toFixed(1) : '—'],
   ].map(([label, value]) => `<div class="stat"><span>${label}</span><strong>${value}</strong></div>`).join('');
   inspect();
+  renderRecentEvents();
 }
 
 function frame(now: number): void {
