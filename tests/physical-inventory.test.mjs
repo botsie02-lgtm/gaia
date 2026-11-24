@@ -207,7 +207,7 @@ test('numerically unresolved mass changes and pair energy overflow fail atomical
   const store = init(sample('wood', 1e16), sample('wood', 3));
   fails(store, split(1, 3));
   fails(store, combine(1, 2));
-  const huge = init(sample('stone', 1e303, 0), sample('stone', 1e303, 0));
+  const huge = init(sample('stone', 5e302, 0), sample('stone', 5e302, 0));
   fails(huge, heat(1, 2));
   fails(huge, combine(1, 2));
 });
