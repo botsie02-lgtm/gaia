@@ -1,0 +1,6 @@
+node_modules/
+dist/
+.sim-test/
+.DS_Store
+.env*
+!.env.example
