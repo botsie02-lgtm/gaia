@@ -1,0 +1,274 @@
+import type {
+  Observation, ObservedAgent, ObservedDeposit, ObservedHub, ObservedStructure, ObservedTile,
+} from '../perception/index.js';
+
+export type MemoryValue = ObservedAgent | ObservedDeposit | ObservedHub |
+  ObservedStructure | Readonly<ObservedTile & { kind: 'terrain' }>;
+export type MemoryStatus = 'current' | 'stale' | 'absent';
+
+export interface MemoryEntry<T extends MemoryValue = MemoryValue> {
+  readonly value: T;
+  readonly status: MemoryStatus;
+  /** Last positive sighting, even when the former position is now empty. */
+  readonly lastObservedTick: number;
+  /** Latest positive sighting or visible absence at the last known position. */
+  readonly lastCheckedTick: number;
+}
+
+export interface MemorySnapshot {
+  readonly version: 1;
+  readonly observerId: number;
+  readonly capacity: number;
+  readonly lastObservationTick: number | null;
+  readonly entries: readonly MemoryEntry[];
+}
+
+export interface MemoryQuery {
+  readonly kind?: MemoryValue['kind'];
+  readonly entityId?: number;
+  readonly material?: ObservedDeposit['material'];
+  readonly x?: number;
+  readonly y?: number;
+  readonly status?: MemoryStatus;
+}
+
+export const DEFAULT_MEMORY_CAPACITY = 512;
+
+function integer(value: unknown, name: string, min = 0): number {
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < min) {
+    throw new RangeError(name + ' must be a safe integer >= ' + min);
+  }
+  return value === 0 ? 0 : value;
+}
+
+function record(value: unknown): Record<string, unknown> {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new TypeError('Expected a record');
+  }
+  return value as Record<string, unknown>;
+}
+
+function array(value: unknown): readonly unknown[] {
+  if (!Array.isArray(value)) throw new TypeError('Expected an array');
+  return value;
+}
+
+function position(value: Record<string, unknown>): { x: number; y: number } {
+  return { x: integer(value.x, 'x'), y: integer(value.y, 'y') };
+}
+
+function copyValue(input: unknown, kind: unknown): MemoryValue {
+  const value = record(input);
+  const p = position(value);
+  if (kind === 'terrain') {
+    if (value.terrain !== 'grass' && value.terrain !== 'dirt' && value.terrain !== 'water') {
+      throw new RangeError('Unknown terrain');
+    }
+    return Object.freeze({ kind, ...p, terrain: value.terrain });
+  }
+  if (value.kind !== kind) throw new TypeError('Mismatched entity kind');
+  const id = integer(value.id, 'entity ID', 1);
+  switch (kind) {
+    case 'agent':
+      if (value.faction !== 'settler' && value.faction !== 'neutral' && value.faction !== 'hostile') {
+        throw new RangeError('Unknown faction');
+      }
+      return Object.freeze({ kind, id, ...p, faction: value.faction });
+    case 'deposit':
+      if (value.material !== 'wood' && value.material !== 'stone') {
+        throw new RangeError('Unknown material');
+      }
+      if (typeof value.amount !== 'number' || !Number.isFinite(value.amount) || value.amount < 0) {
+        throw new RangeError('Invalid observed quantity');
+      }
+      return Object.freeze({ kind, id, ...p, material: value.material,
+        amount: value.amount === 0 ? 0 : value.amount });
+    case 'structure':
+      if (value.structure !== 'hearth') throw new RangeError('Unknown structure');
+      return Object.freeze({ kind, id, ...p, structure: value.structure });
+    case 'hub':
+      return Object.freeze({ kind, id, ...p });
+    default:
+      throw new TypeError('Unknown memory kind');
+  }
+}
+
+function tileKey(p: { readonly x: number; readonly y: number }): string {
+  return p.x + ':' + p.y;
+}
+
+function key(value: MemoryValue): string {
+  return value.kind === 'terrain' ? 'tile:' + tileKey(value) : 'entity:' + value.id;
+}
+
+function entry(value: MemoryValue, status: MemoryStatus, lastObservedTick: number,
+  lastCheckedTick: number): MemoryEntry {
+  return Object.freeze({ value, status, lastObservedTick, lastCheckedTick });
+}
+
+/** Newest evidence first; ties favor entities, then numeric ID or row-major tile. */
+function compare(a: MemoryEntry, b: MemoryEntry): number {
+  const recency = b.lastCheckedTick - a.lastCheckedTick;
+  if (recency) return recency;
+  const av = a.value;
+  const bv = b.value;
+  if (av.kind === 'terrain') {
+    return bv.kind === 'terrain' ? av.y - bv.y || av.x - bv.x : 1;
+  }
+  return bv.kind === 'terrain' ? -1 : av.id - bv.id;
+}
+
+/** Validate the local projection and copy only explicitly observable fields. */
+function sightings(observation: Observation, observerId: number): Map<string, MemoryValue> {
+  const observer = copyValue(observation.observer, 'agent');
+  if (observer.kind !== 'agent' || observer.id !== observerId) {
+    throw new RangeError('Observation belongs to a different agent');
+  }
+  const range = integer(observation.range, 'range');
+  const seen = new Map<string, MemoryValue>();
+  const add = (value: MemoryValue): void => {
+    const k = key(value);
+    if (seen.has(k)) throw new RangeError('Duplicate observed tile or entity ID');
+    seen.set(k, value);
+  };
+  for (const tile of array(observation.terrain)) {
+    const value = copyValue(tile, 'terrain');
+    if (Math.abs(value.x - observer.x) + Math.abs(value.y - observer.y) > range) {
+      throw new RangeError('Tile outside observation range');
+    }
+    add(value);
+  }
+  if (!seen.has('tile:' + tileKey(observer))) throw new RangeError('Observer tile is not visible');
+  const addEntity = (input: unknown, kind: string): void => {
+    const value = copyValue(input, kind);
+    if (value.kind === 'terrain' || value.id === observerId ||
+        !seen.has('tile:' + tileKey(value))) {
+      throw new RangeError('Entity is not a visible other object');
+    }
+    add(value);
+  };
+  for (const agent of array(observation.agents)) addEntity(agent, 'agent');
+  for (const deposit of array(observation.deposits)) addEntity(deposit, 'deposit');
+  for (const structure of array(observation.structures)) addEntity(structure, 'structure');
+  if (observation.hub !== null) addEntity(observation.hub, 'hub');
+  return seen;
+}
+
+function isStatus(value: unknown): value is MemoryStatus {
+  return value === 'current' || value === 'stale' || value === 'absent';
+}
+
+function isKind(value: unknown): value is MemoryValue['kind'] {
+  return value === 'terrain' || value === 'agent' || value === 'deposit' ||
+    value === 'structure' || value === 'hub';
+}
+
+/** One instance per agent, scoped to one world. No World or ledger access. */
+export class AgentMemory {
+  readonly #observerId: number;
+  readonly #capacity: number;
+  #lastObservationTick: number | null = null;
+  #entries: readonly MemoryEntry[] = Object.freeze([]);
+
+  constructor(observerId: number, capacity = DEFAULT_MEMORY_CAPACITY) {
+    this.#observerId = integer(observerId, 'observer ID', 1);
+    this.#capacity = integer(capacity, 'capacity', 1);
+  }
+
+  get observerId(): number { return this.#observerId; }
+  get capacity(): number { return this.#capacity; }
+  get size(): number { return this.#entries.length; }
+
+  /** Apply one complete observation per strictly increasing logical tick.
+   * Invalid input leaves the previous snapshot untouched. */
+  update(observation: Observation): MemorySnapshot {
+    const tick = integer(observation.tick, 'observation tick');
+    if (this.#lastObservationTick !== null && tick <= this.#lastObservationTick) {
+      throw new RangeError('Observation ticks must strictly increase');
+    }
+    const seen = sightings(observation, this.observerId);
+    const next: MemoryEntry[] = [];
+    for (const old of this.#entries) {
+      const fresh = seen.get(key(old.value));
+      if (fresh) {
+        if (fresh.kind !== old.value.kind) throw new RangeError('Entity ID changed kind');
+        continue; // Positive sightings (including movement) override old positions.
+      }
+      if (old.value.kind !== 'terrain' && seen.has('tile:' + tileKey(old.value))) {
+        next.push(entry(old.value, 'absent', old.lastObservedTick, tick));
+      } else if (old.status === 'current') {
+        next.push(entry(old.value, 'stale', old.lastObservedTick, old.lastCheckedTick));
+      } else {
+        next.push(old);
+      }
+    }
+    for (const value of seen.values()) next.push(entry(value, 'current', tick, tick));
+    next.sort(compare);
+    this.#entries = Object.freeze(next.slice(0, this.capacity));
+    this.#lastObservationTick = tick;
+    return this.snapshot();
+  }
+
+  /** Filters combine with AND; positions refer to last positive sightings.
+   * Resource results include stale/absent/zero records unless filtered. */
+  query(filter: MemoryQuery = {}): readonly MemoryEntry[] {
+    const q = record(filter);
+    if (q.kind !== undefined && !isKind(q.kind)) throw new RangeError('Unknown query kind');
+    if (q.status !== undefined && !isStatus(q.status)) throw new RangeError('Unknown query status');
+    if (q.material !== undefined && q.material !== 'wood' && q.material !== 'stone') {
+      throw new RangeError('Unknown query material');
+    }
+    const id = q.entityId === undefined ? undefined : integer(q.entityId, 'entity ID', 1);
+    const x = q.x === undefined ? undefined : integer(q.x, 'x');
+    const y = q.y === undefined ? undefined : integer(q.y, 'y');
+    return Object.freeze(this.#entries.filter(({ value, status }) =>
+      (q.kind === undefined || value.kind === q.kind) &&
+      (q.status === undefined || status === q.status) &&
+      (id === undefined || (value.kind !== 'terrain' && value.id === id)) &&
+      (q.material === undefined || (value.kind === 'deposit' && value.material === q.material)) &&
+      (x === undefined || value.x === x) && (y === undefined || value.y === y)));
+  }
+
+  snapshot(): MemorySnapshot {
+    return Object.freeze({ version: 1, observerId: this.observerId, capacity: this.capacity,
+      lastObservationTick: this.#lastObservationTick, entries: this.#entries });
+  }
+
+  toJSON(): MemorySnapshot { return this.snapshot(); }
+
+  /** Restore trusted save data; validation checks structure, not provenance. */
+  static fromSnapshot(input: unknown): AgentMemory {
+    const data = record(input);
+    if (data.version !== 1) throw new TypeError('Unsupported memory snapshot version');
+    const memory = new AgentMemory(integer(data.observerId, 'observer ID', 1),
+      integer(data.capacity, 'capacity', 1));
+    const tick = data.lastObservationTick === null ? null :
+      integer(data.lastObservationTick, 'observation tick');
+    const entries = array(data.entries);
+    if (entries.length > memory.capacity || (tick === null && entries.length !== 0) ||
+        (tick !== null && entries.length === 0)) throw new RangeError('Invalid memory size');
+    const keys = new Set<string>();
+    const restored: MemoryEntry[] = [];
+    for (const input of entries) {
+      const data = record(input);
+      const raw = record(data.value);
+      const value = copyValue(raw, raw.kind);
+      const status = data.status;
+      const observed = integer(data.lastObservedTick, 'last observed tick');
+      const checked = integer(data.lastCheckedTick, 'last checked tick');
+      if (!isStatus(status) || tick === null || observed > checked || checked > tick ||
+          (status === 'current' && (observed !== tick || checked !== tick)) ||
+          (status === 'stale' && (observed !== checked || checked >= tick)) ||
+          (status === 'absent' && (value.kind === 'terrain' || observed >= checked)) ||
+          (value.kind !== 'terrain' && value.id === memory.observerId) || keys.has(key(value))) {
+        throw new RangeError('Inconsistent memory entry');
+      }
+      keys.add(key(value));
+      restored.push(entry(value, status, observed, checked));
+    }
+    restored.sort(compare);
+    memory.#entries = Object.freeze(restored);
+    memory.#lastObservationTick = tick;
+    return memory;
+  }
+}
