@@ -1,4 +1,7 @@
 /** Simulation types. This directory must not import browser/UI code. */
+import type { EventLedger } from './history/events.js';
+import type { SkillConfig, SkillRecord } from './skills/index.js';
+
 export type Material = 'wood' | 'stone';
 export type Terrain = 'grass' | 'dirt' | 'water';
 export type Faction = 'settler' | 'neutral' | 'hostile';
@@ -12,6 +15,7 @@ export interface Agent extends Position {
   energy: number;
   resting: boolean;
   cargo: Inventory;
+  skills: { gathering: SkillRecord };
 }
 
 export interface Deposit extends Position {
@@ -40,7 +44,9 @@ export interface World {
   width: number;
   height: number;
   terrain: Terrain[];
-  hub: Position;
+  hub: Position & { id: number };
+  readonly history: EventLedger;
+  readonly gatheringSkillConfig: SkillConfig;
   inventory: Inventory;
   agents: Agent[];
   deposits: Deposit[];
