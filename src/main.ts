@@ -2,6 +2,8 @@ import './style.css';
 import { createWorld, stepWorld } from './sim/world.js';
 import { drawWorld, TILE } from './ui/draw.js';
 import type { World } from './sim/model.js';
+import { resourceOwnerId } from './sim/resource-actions/index.js';
+import type { OwnerKind } from './sim/resource-actions/index.js';
 
 const app = document.querySelector<HTMLDivElement>('#app');
 if (!app) throw new Error('App root not found');
@@ -18,6 +20,7 @@ app.innerHTML = `
       <label>Ticks / second <select id="speed"><option value="5">5</option><option value="10" selected>10</option><option value="30">30</option><option value="60">60</option></select></label>
       <label>World seed <input id="seed" type="number" value="12345" /></label>
       <label>Agent policy <select id="agent-policy"><option value="knowledge" selected>Knowledge-limited</option><option value="legacy">Legacy</option></select></label>
+      <label>Resources <select id="resource-mode"><option value="physical" selected>Physical matter</option><option value="legacy">Legacy units</option></select></label>
       <label><input id="visibility" type="checkbox" /> Selected agent sight</label>
       <button id="reset" class="secondary">Regenerate</button>
     </div>
@@ -25,7 +28,7 @@ app.innerHTML = `
     <section class="panel"><div class="section-label">SIMULATION</div><div id="stats" class="stats"></div></section>
     <section class="panel"><div class="section-label">INSPECTOR</div><div id="inspector" class="inspector">Click a tile to inspect its terrain and entities.</div></section>
     <section class="panel"><div class="section-label">RECENT EVENTS</div><div id="recent-events" class="inspector">No events yet.</div><p class="small" id="history-count"></p></section>
-    <section class="panel"><div class="section-label">RULES IN EFFECT</div><p>Agents choose resources, gather finite deposits, return cargo to the hub, rest when tired, and construct a hearth from wood and stone.</p><p>Once built, the hearth burns wood to generate and lose heat over time.</p><p class="small">This is an abstract material process, not atomic physics or a learned intelligence system yet.</p></section>
+    <section class="panel"><div class="section-label">RULES IN EFFECT</div><p>Agents choose resources, gather finite deposits, return cargo to the hub, rest when tired, and construct a hearth from wood and stone.</p><p id="hearth-rule"></p><p class="small">This is an abstract material process, not atomic physics or a learned intelligence system yet.</p></section>
     <section class="panel legend"><div class="section-label">LEGEND</div><div><span class="mark wood"></span>Wood <span class="mark stone"></span>Stone <span class="mark agent"></span>Agent <span class="mark hearth"></span>Hearth</div></section>
   </aside></main>
   <footer>GAIA simulation prototype 0.2 · deterministic fixed-step core · browser is a viewer</footer>`;
@@ -49,8 +52,10 @@ const speed = get<HTMLSelectElement>('speed');
 const seedInput = get<HTMLInputElement>('seed');
 const policySelect = get<HTMLSelectElement>('agent-policy');
 const visibility = get<HTMLInputElement>('visibility');
+const resourceSelect = get<HTMLSelectElement>('resource-mode');
+const chosenResourceMode = () => resourceSelect.value === 'legacy' ? 'legacy' as const : 'physical' as const;
 const chosenMode = () => policySelect.value === 'legacy' ? 'legacy' as const : 'knowledge' as const;
-let world: World = createWorld(12345, { agentMode: chosenMode() });
+let world: World = createWorld(12345, { agentMode: chosenMode(), resourceMode: chosenResourceMode() });
 let selectedAgentId: number | null = null;
 let running = true;
 let selected: { x: number; y: number } | null = null;
@@ -71,12 +76,22 @@ function renderRecentEvents(): void {
     const target = event.targetId === undefined ? '' : ' target #' + event.targetId;
     const details = Object.entries(event.details ?? {}).filter(([key]) => key !== 'unit')
       .map(([key, value]) => key + '=' + (key === 'proficiency' && typeof value === 'number'
-        ? (value * 100).toFixed(1) + '%' : String(value))).join(', ');
+        ? (value * 100).toFixed(1) + '%' : typeof value === 'object' ? JSON.stringify(value) : String(value))).join(', ');
     return '#' + event.eventId + ' · tick ' + event.tick + '\n' + event.kind + actor + target +
       (details ? '\n' + details : '');
   }).join('\n\n');
   historyCount.textContent = 'Latest ' + events.length + ' · retained ' + world.history.size +
-    ' / ' + world.history.capacity + ' · resource amounts in prototype units';
+    ' / ' + world.history.capacity + ' · units and physical transfer receipts where applicable';
+}
+
+function physicalLines(kind: OwnerKind, id: number): string[] {
+  if (!world.physicalInventory) return [];
+  const owner = resourceOwnerId(kind, id);
+  const samples = world.physicalInventory.forOwner(owner);
+  const mass = samples.reduce((sum, s) => sum + s.massKg, 0);
+  return [owner + ': ' + mass.toFixed(3) + ' kg · ' + samples.length + ' samples',
+    ...samples.map(s => '  #' + s.sampleId + ' ' + s.materialId + ' ' + s.massKg + ' kg · ' +
+      s.temperatureC + ' °C · ' + s.phase)];
 }
 
 function inspect(): void {
@@ -109,6 +124,13 @@ function inspect(): void {
       '% · ' + skill.attempts + ' practices · ' + skill.experience + ' XP');
   }
   for (const structure of structures) lines.push(`Hearth #${structure.id}: heat ${structure.heat.toFixed(1)}, fuel ${structure.fuel}`);
+  if (world.hub.x === x && world.hub.y === y) {
+    lines.push('Hub #' + world.hub.id + ': ' + world.inventory.wood + ' wood / ' + world.inventory.stone + ' stone');
+    lines.push(...physicalLines('hub', world.hub.id));
+  }
+  for (const d of deposits) lines.push(...physicalLines('deposit', d.id));
+  for (const a of agents) lines.push(...physicalLines('agent', a.id));
+  for (const h of structures) lines.push(...physicalLines('structure', h.id));
   if (lines.length === 1) lines.push('No entities on this tile.');
   inspector.textContent = lines.join('\n');
 }
@@ -123,7 +145,11 @@ function render(): void {
   mode.classList.toggle('paused', !running);
   pauseButton.textContent = running ? 'Pause' : 'Resume';
   const average = world.agents.reduce((sum, agent) => sum + agent.energy, 0) / world.agents.length;
+  get<HTMLParagraphElement>('hearth-rule').textContent = world.resourceMode === 'physical' ?
+    'Physical hearth retains fuel; combustion and abstract heat are disabled.' :
+    'Once built, the hearth burns wood to generate and lose abstract heat over time.';
   stats.innerHTML = [
+    ['Resource mode', world.resourceMode],
     ['Agents', world.agents.length], ['Average energy', `${average.toFixed(0)} / 100`],
     ['Wood stored', world.inventory.wood], ['Stone stored', world.inventory.stone],
     ['Wood harvested', world.stats.woodHarvested], ['Stone harvested', world.stats.stoneHarvested],
@@ -162,7 +188,7 @@ get<HTMLButtonElement>('step').addEventListener('click', () => {
 function regenerate(): void {
   const seed = Number(seedInput.value);
   if (!Number.isFinite(seed)) { seedInput.value = '12345'; return; }
-  world = createWorld(Math.trunc(seed), { agentMode: chosenMode() });
+  world = createWorld(Math.trunc(seed), { agentMode: chosenMode(), resourceMode: chosenResourceMode() });
   selectedAgentId = null;
   selected = null;
   inspector.textContent = 'Click a tile to inspect its terrain and entities.';
@@ -171,6 +197,7 @@ function regenerate(): void {
  }
 get<HTMLButtonElement>('reset').addEventListener('click', regenerate);
 policySelect.addEventListener('change', regenerate);
+resourceSelect.addEventListener('change', regenerate);
 visibility.addEventListener('change', render);
 canvas.addEventListener('click', (event) => {
   const rect = canvas.getBoundingClientRect();

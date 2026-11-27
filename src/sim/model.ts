@@ -6,6 +6,9 @@ import type { AgentMemory } from './memory/index.js';
 import type { Observation } from './perception/index.js';
 import type { AgentMode, Decision } from './agents/index.js';
 
+import type { PhysicalInventory } from './inventory/index.js';
+import type { PhysicalResourceConfig, ResourceMode } from './physical-world.js';
+
 export type Material = 'wood' | 'stone';
 export type Terrain = 'grass' | 'dirt' | 'water';
 export type Faction = 'settler' | 'neutral' | 'hostile';
@@ -44,6 +47,9 @@ export interface Hearth extends Position {
 }
 
 export interface World {
+  readonly resourceMode: ResourceMode;
+  readonly physicalConfig: PhysicalResourceConfig | null;
+  readonly physicalInventory: PhysicalInventory | null;
   readonly agentMode: AgentMode;
   readonly perceptionRange: number;
   readonly memoryCapacity: number;
