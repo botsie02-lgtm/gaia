@@ -4,7 +4,7 @@ import { EventLedger } from './history/events.js';
 import { applyPracticeOutcome, createSkillRecord } from './skills/index.js';
 import type { SkillConfig } from './skills/index.js';
 
-import { AgentMemory, DEFAULT_MEMORY_CAPACITY } from './memory/index.js';
+import { AgentMemory, DEFAULT_MEMORY_CAPACITY, NAVIGATION_MEMORY_MAX_CAPACITY } from './memory/index.js';
 import { observeAgent, DEFAULT_PERCEPTION_RANGE } from './perception/index.js';
 import { decideAgent } from './agents/index.js';
 import type { AgentMode, AgentAction } from './agents/index.js';
@@ -104,7 +104,8 @@ export function createWorld(seed = 12345, options: WorldOptions = {}): World {
   for (let i = 0; i < AGENT_COUNT; i++) {
     const agent: Agent = {
       id: world.nextEntityId++,
-      memory: new AgentMemory(world.nextEntityId - 1, memoryCapacity),
+      memory: new AgentMemory(world.nextEntityId - 1, memoryCapacity,
+         agentMode === 'knowledge' && memoryCapacity <= NAVIGATION_MEMORY_MAX_CAPACITY ? 'navigation' : 'recency'),
       kind: 'agent',
       faction: 'settler',
       x: hub.x + (i % 5) - 2,

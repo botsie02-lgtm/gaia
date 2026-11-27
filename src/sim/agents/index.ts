@@ -115,14 +115,30 @@ export function decideAgent(observation: Observation, memory: MemorySnapshot,
       if (result) return result;
     }
   }
-  // Explore a reachable known tile bordering unknown in-bounds terrain.
-  // BFS order breaks equal-distance ties deterministically.
-  for (const route of reachable.values()) {
-    if (!route.first) continue;
-    if (neighbors(route.position).some(p => p.x >= 0 && p.y >= 0 &&
-      p.x < config.width && p.y < config.height && !terrain.has(key(p)))) {
-      return move(carrying ? 'Explore for hub or resources' : 'Explore unknown terrain', route.first);
-    }
+  // Explore only reachable known frontier tiles. In constrained memories, a
+  // forgotten tile is not necessarily a new place. Recent actual visits are
+  // attached to retained terrain; penalize them only during exploration.
+  const frontiers = [...reachable.values()].filter(route => route.first &&
+    neighbors(route.position).some(p => p.x >= 0 && p.y >= 0 &&
+      p.x < config.width && p.y < config.height && !terrain.has(key(p))));
+  if (memory.retention === 'navigation') {
+    const visits = new Map(memory.entries.filter(e => e.lastVisitedTick !== undefined)
+      .map(e => [key(e.value), e.lastVisitedTick!]));
+    const penalty = (p: Readonly<Position>): number =>
+      Math.max(0, 13 - (observation.tick - (visits.get(key(p)) ?? -13)));
+    const home = carrying > 0 ? [...hubs.values()].sort((a,b) => a.id-b.id)[0] : undefined;
+    const homeDistance = (p: Readonly<Position>): number => home
+      ? Math.abs(p.x-home.x)+Math.abs(p.y-home.y) : 0;
+    // Prefer a less recently visited first step; when disconnected and carrying
+    // cargo, rank frontiers toward the remembered hub, not arbitrary frontiers.
+    // No visit penalty for normal gathering/return routes above.
+    frontiers.sort((a,b) => penalty(a.first!) - penalty(b.first!) ||
+      homeDistance(a.position) - homeDistance(b.position) ||
+      penalty(a.position) - penalty(b.position) || a.distance - b.distance);
+  }
+  const frontier = frontiers[0];
+  if (frontier?.first) {
+    return move(carrying ? 'Explore for hub or resources' : 'Explore unknown terrain', frontier.first);
   }
   return decision('No reachable known goal or frontier', { kind: 'idle' });
 }

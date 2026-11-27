@@ -13,10 +13,13 @@ export interface MemoryEntry<T extends MemoryValue = MemoryValue> {
   readonly lastObservedTick: number;
   /** Latest positive sighting or visible absence at the last known position. */
   readonly lastCheckedTick: number;
+  /** Own observed visit; attached to a retained terrain entry, not a second map. */
+  readonly lastVisitedTick?: number;
 }
 
 export interface MemorySnapshot {
   readonly version: 1;
+  readonly retention?: 'navigation';
   readonly observerId: number;
   readonly capacity: number;
   readonly lastObservationTick: number | null;
@@ -33,6 +36,9 @@ export interface MemoryQuery {
 }
 
 export const DEFAULT_MEMORY_CAPACITY = 512;
+export type MemoryRetention = 'recency' | 'navigation';
+/** Conservative rollout: preserve the established larger-memory policy. */
+export const NAVIGATION_MEMORY_MAX_CAPACITY = 64;
 
 function integer(value: unknown, name: string, min = 0): number {
   if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < min) {
@@ -102,8 +108,9 @@ function key(value: MemoryValue): string {
 }
 
 function entry(value: MemoryValue, status: MemoryStatus, lastObservedTick: number,
-  lastCheckedTick: number): MemoryEntry {
-  return Object.freeze({ value, status, lastObservedTick, lastCheckedTick });
+  lastCheckedTick: number, lastVisitedTick?: number): MemoryEntry {
+  return Object.freeze({ value, status, lastObservedTick, lastCheckedTick,
+    ...(lastVisitedTick === undefined ? {} : { lastVisitedTick }) });
 }
 
 /** Newest evidence first; ties favor entities, then numeric ID or row-major tile. */
@@ -116,6 +123,64 @@ function compare(a: MemoryEntry, b: MemoryEntry): number {
     return bv.kind === 'terrain' ? av.y - bv.y || av.x - bv.x : 1;
   }
   return bv.kind === 'terrain' ? -1 : av.id - bv.id;
+}
+
+const manhattan = (a: { x: number; y: number }, b: { x: number; y: number }): number =>
+  Math.abs(a.x - b.x) + Math.abs(a.y - b.y);
+
+/** Select within the original entry budget. No coordinates beyond candidate evidence.
+ * Keep the hub and a connected corridor from it toward the observer, then reserve
+ * space for useful deposits, recent visits and local terrain. */
+function retainNavigation(entries: MemoryEntry[], observation: Observation, capacity: number): MemoryEntry[] {
+  const origin = observation.observer;
+  const chosen = new Set<MemoryEntry>();
+  const add = (e: MemoryEntry | undefined): void => {
+    if (e && chosen.size < capacity) chosen.add(e);
+  };
+  const terrain = new Map(entries.filter(e => e.value.kind === 'terrain').map(e => [tileKey(e.value), e]));
+  const hub = entries.filter(e => e.value.kind === 'hub' && e.status !== 'absent')
+    .sort(compare)[0];
+  add(hub);
+  add(terrain.get(tileKey(origin)));
+  if (hub) {
+    const start = tileKey(hub.value);
+    const root = terrain.get(start);
+    if (root?.value.kind === 'terrain' && root.value.terrain !== 'water') {
+      const queue = [root];
+      const parents = new Map<string, string | null>([[start, null]]);
+      let nearest = root;
+      for (let i = 0; i < queue.length; i++) {
+        const e = queue[i]!, p = e.value;
+        if (manhattan(p, origin) < manhattan(nearest.value, origin)) nearest = e;
+        if (manhattan(p, origin) === 0) break;
+        for (const n of [{ x: p.x+1, y:p.y }, { x:p.x,y:p.y+1 },
+          { x:p.x-1,y:p.y }, { x:p.x,y:p.y-1 }]) {
+          const k = tileKey(n), next = terrain.get(k);
+          if (parents.has(k) || next?.value.kind !== 'terrain' || next.value.terrain === 'water') continue;
+          parents.set(k, tileKey(p));
+          queue.push(next);
+        }
+      }
+      // If disconnected, preserve the hub-connected prefix closest to self.
+      const corridor: MemoryEntry[] = [];
+      for (let k: string | null = tileKey(nearest.value); k !== null; k = parents.get(k) ?? null) {
+        corridor.push(terrain.get(k)!);
+      }
+      const budget = Math.max(0, Math.floor(capacity * 0.75) - chosen.size);
+      for (const e of corridor.reverse().slice(0, budget)) add(e);
+    }
+  }
+  const near = (a: MemoryEntry, b: MemoryEntry): number =>
+    manhattan(a.value, origin) - manhattan(b.value, origin) || compare(a,b);
+  const deposits = entries.filter(e => e.value.kind === 'deposit' &&
+    e.value.amount > 0 && e.status !== 'absent').sort(near);
+  for (const e of deposits.slice(0, Math.max(1, Math.floor(capacity / 8)))) add(e);
+  const visits = entries.filter(e => e.lastVisitedTick !== undefined)
+    .sort((a,b) => b.lastVisitedTick! - a.lastVisitedTick! || compare(a,b));
+  for (const e of visits.slice(0, Math.min(8, Math.floor(capacity / 4)))) add(e);
+  for (const e of [...terrain.values()].sort(near)) add(e);
+  for (const e of entries.sort(compare)) add(e);
+  return [...chosen].sort(compare);
 }
 
 /** Validate the local projection and copy only explicitly observable fields. */
@@ -167,12 +232,15 @@ function isKind(value: unknown): value is MemoryValue['kind'] {
 export class AgentMemory {
   readonly #observerId: number;
   readonly #capacity: number;
+  readonly #retention: MemoryRetention;
   #lastObservationTick: number | null = null;
   #entries: readonly MemoryEntry[] = Object.freeze([]);
 
-  constructor(observerId: number, capacity = DEFAULT_MEMORY_CAPACITY) {
+  constructor(observerId: number, capacity = DEFAULT_MEMORY_CAPACITY, retention: MemoryRetention = 'recency') {
     this.#observerId = integer(observerId, 'observer ID', 1);
     this.#capacity = integer(capacity, 'capacity', 1);
+    if (retention !== 'recency' && retention !== 'navigation') throw new RangeError('Invalid retention');
+    this.#retention = retention;
   }
 
   get observerId(): number { return this.#observerId; }
@@ -188,6 +256,8 @@ export class AgentMemory {
     }
     const seen = sightings(observation, this.observerId);
     const next: MemoryEntry[] = [];
+    const oldVisits = new Map(this.#entries.filter(e => e.lastVisitedTick !== undefined)
+      .map(e => [key(e.value), e.lastVisitedTick]));
     for (const old of this.#entries) {
       const fresh = seen.get(key(old.value));
       if (fresh) {
@@ -197,14 +267,18 @@ export class AgentMemory {
       if (old.value.kind !== 'terrain' && seen.has('tile:' + tileKey(old.value))) {
         next.push(entry(old.value, 'absent', old.lastObservedTick, tick));
       } else if (old.status === 'current') {
-        next.push(entry(old.value, 'stale', old.lastObservedTick, old.lastCheckedTick));
+        next.push(entry(old.value, 'stale', old.lastObservedTick, old.lastCheckedTick, old.lastVisitedTick));
       } else {
         next.push(old);
       }
     }
-    for (const value of seen.values()) next.push(entry(value, 'current', tick, tick));
-    next.sort(compare);
-    this.#entries = Object.freeze(next.slice(0, this.capacity));
+    for (const value of seen.values()) {
+      const visit = this.#retention === 'navigation' && value.kind === 'terrain'
+        ? (tileKey(value) === tileKey(observation.observer) ? tick : oldVisits.get(key(value))) : undefined;
+      next.push(entry(value, 'current', tick, tick, visit));
+    }
+    this.#entries = Object.freeze(this.#retention === 'navigation'
+      ? retainNavigation(next, observation, this.capacity) : next.sort(compare).slice(0, this.capacity));
     this.#lastObservationTick = tick;
     return this.snapshot();
   }
@@ -231,6 +305,7 @@ export class AgentMemory {
 
   snapshot(): MemorySnapshot {
     return Object.freeze({ version: 1, observerId: this.observerId, capacity: this.capacity,
+      ...(this.#retention === 'navigation' ? { retention: 'navigation' as const } : {}),
       lastObservationTick: this.#lastObservationTick, entries: this.#entries });
   }
 
@@ -240,8 +315,9 @@ export class AgentMemory {
   static fromSnapshot(input: unknown): AgentMemory {
     const data = record(input);
     if (data.version !== 1) throw new TypeError('Unsupported memory snapshot version');
+    if (data.retention !== undefined && data.retention !== 'navigation') throw new RangeError('Invalid retention');
     const memory = new AgentMemory(integer(data.observerId, 'observer ID', 1),
-      integer(data.capacity, 'capacity', 1));
+      integer(data.capacity, 'capacity', 1), data.retention === 'navigation' ? 'navigation' : 'recency');
     const tick = data.lastObservationTick === null ? null :
       integer(data.lastObservationTick, 'observation tick');
     const entries = array(data.entries);
@@ -263,8 +339,12 @@ export class AgentMemory {
           (value.kind !== 'terrain' && value.id === memory.observerId) || keys.has(key(value))) {
         throw new RangeError('Inconsistent memory entry');
       }
+      const visit = data.lastVisitedTick === undefined ? undefined : integer(data.lastVisitedTick, 'last visited tick');
+      if (visit !== undefined && (memory.#retention !== 'navigation' || value.kind !== 'terrain' || visit > observed)) {
+        throw new RangeError('Inconsistent visit evidence');
+      }
       keys.add(key(value));
-      restored.push(entry(value, status, observed, checked));
+      restored.push(entry(value, status, observed, checked, visit));
     }
     restored.sort(compare);
     memory.#entries = Object.freeze(restored);
