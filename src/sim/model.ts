@@ -2,6 +2,10 @@
 import type { EventLedger } from './history/events.js';
 import type { SkillConfig, SkillRecord } from './skills/index.js';
 
+import type { AgentMemory } from './memory/index.js';
+import type { Observation } from './perception/index.js';
+import type { AgentMode, Decision } from './agents/index.js';
+
 export type Material = 'wood' | 'stone';
 export type Terrain = 'grass' | 'dirt' | 'water';
 export type Faction = 'settler' | 'neutral' | 'hostile';
@@ -16,6 +20,9 @@ export interface Agent extends Position {
   resting: boolean;
   cargo: Inventory;
   skills: { gathering: SkillRecord };
+  readonly memory: AgentMemory;
+  observation?: Observation;
+  decision?: Decision;
 }
 
 export interface Deposit extends Position {
@@ -37,6 +44,9 @@ export interface Hearth extends Position {
 }
 
 export interface World {
+  readonly agentMode: AgentMode;
+  readonly perceptionRange: number;
+  readonly memoryCapacity: number;
   seed: number;
   randomState: number;
   tick: number;

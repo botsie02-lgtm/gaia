@@ -1,6 +1,8 @@
 import type { Agent, World } from '../sim/model.js';
 import { indexOf } from '../sim/world.js';
 
+import type { Observation } from '../sim/perception/index.js';
+
 export const TILE = 14;
 
 function agentColor(agent: Agent): string {
@@ -9,7 +11,7 @@ function agentColor(agent: Agent): string {
   return '#f5d77b';
 }
 
-export function drawWorld(ctx: CanvasRenderingContext2D, world: World): void {
+export function drawWorld(ctx: CanvasRenderingContext2D, world: World, observation?: Observation): void {
   const { width, height } = world;
   ctx.imageSmoothingEnabled = false;
   ctx.clearRect(0, 0, width * TILE, height * TILE);
@@ -78,5 +80,12 @@ export function drawWorld(ctx: CanvasRenderingContext2D, world: World): void {
     else if (agent.cargo.stone > 0) ctx.fillStyle = '#c6cbca';
     else continue;
     ctx.fillRect(x + 3, y - 2, 4, 3);
+  }
+  // Highlight the actual pre-action observation, not a new projection.
+  if (observation) {
+    ctx.fillStyle = 'rgba(255, 230, 140, 0.16)';
+    for (const tile of observation.terrain) ctx.fillRect(tile.x * TILE, tile.y * TILE, TILE, TILE);
+    ctx.strokeStyle = '#ffe68c';
+    ctx.strokeRect(observation.observer.x * TILE + 1, observation.observer.y * TILE + 1, TILE - 2, TILE - 2);
   }
 }
