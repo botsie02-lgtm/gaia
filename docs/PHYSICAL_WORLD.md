@@ -68,10 +68,10 @@ and rebuild projections, never reinitialize from those counts. Old legacy
 snapshots lack the new fields; full-world save/load and migration remain future
 work. Resource mode is fixed at creation.
 
-Each owner view scans live samples; each transfer plans using the sorted
-inventory snapshot and performs a revision-checked atomic transaction. As
-samples split, retained sample count grows. Browser inspection can list every
-sample for an owner, and repeated perception and rendering reads scan the store.
-No caching, indexing, chunking, sample consolidation, or browser performance
-benchmark is introduced. Profile and add owner indexing before increasing world
-size. The browser inspector is omniscient for debugging, not agent knowledge.
+Owner views use a derived index, and transfers read the allocation cursor
+without constructing a full snapshot. The registry remains authoritative and
+transactions remain revision-checked and atomic. As samples split, retained
+sample count grows; the index does not consolidate samples or change identities.
+Owner registry validation, large-owner sorting, perception and rendering remain
+potential costs. See INVENTORY_PERFORMANCE.md for measured headless scenarios;
+no browser benchmark, chunking or consolidation is implemented. The browser inspector is omniscient for debugging, not agent knowledge.
