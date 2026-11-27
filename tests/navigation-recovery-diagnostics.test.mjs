@@ -15,6 +15,16 @@ test('long duration navigation comparison reports unchanged diagnostic metrics',
     const r = runDiagnostics(c);
     assert.ok(r.memory.peakPerAgent <= c.memoryCapacity);
     assert.ok(Object.values(r.physical.failures).every(n => n === 0));
+    if (c.seed===7 && c.ticks===1000) {
+      assert.ok(sum(r.delivered)>81,'productive progress must exceed reproduced baseline');
+      assert.ok(r.resources.lastDeliveryTick>=900,'delivery must resume late in run');
+      assert.ok(r.resources.maxNoDeliveryRun<200,'avoid the 565-tick stall');
+      assert.ok(r.fullCargo.maxRun<200,'world-wide progress must not conceal an indefinitely loaded agent');
+    }
+    if (c.seed===12345 && c.ticks===200) {
+      assert.ok(sum(r.delivered)>110);
+      assert.ok(r.fullCargo.maxRun<196);
+    }
     console.log('GAIA_RECOVERY ' + JSON.stringify({
       seed:c.seed,ticks:c.ticks,agents:c.agentCount,thermal:c.thermal,
       delivered:sum(r.delivered),harvested:sum(r.harvested),remaining:sum(r.resources.remaining),
