@@ -14,6 +14,9 @@ import { physicalConfig, initializePhysicalWorld, movePhysical, physicalDetails,
 import { resourceOwnerId } from './resource-actions/index.js';
 import type { ResourceTransferReceipt } from './resource-actions/index.js';
 
+import { createThermalState, processThermalContacts } from './environment/index.js';
+import type { ThermalConfig } from './environment/index.js';
+
 export const WIDTH = 52;
 export const HEIGHT = 34;
 export const AGENT_COUNT = 14;
@@ -30,6 +33,8 @@ export const GATHERING_SKILL: SkillConfig = Object.freeze({
 });
 
 export interface WorldOptions {
+  /** Omit or false to preserve existing behavior; true uses scenario defaults. */
+  readonly thermal?: boolean | Partial<ThermalConfig>;
   readonly resourceMode?: ResourceMode;
   readonly kgPerUnit?: Readonly<Inventory>;
   readonly initialTemperatureC?: Readonly<Inventory>;
@@ -65,12 +70,16 @@ export function createWorld(seed = 12345, options: WorldOptions = {}): World {
   const resourceMode = options.resourceMode ?? 'legacy';
   if (resourceMode !== 'legacy' && resourceMode !== 'physical') throw new RangeError('Unknown resource mode');
   const config = resourceMode === 'physical' ? physicalConfig(options.kgPerUnit, options.initialTemperatureC) : null;
+  const thermal = options.thermal === undefined || options.thermal === false ? undefined :
+    createThermalState(options.thermal === true ? {} : options.thermal);
+  if (thermal && resourceMode !== 'physical') throw new RangeError('Thermal mode requires physical resources');
   const width = WIDTH;
   const height = HEIGHT;
   const hub = { x: Math.floor(width / 2), y: Math.floor(height / 2) };
   const world: World = {
     agentMode, perceptionRange, memoryCapacity,
     resourceMode, physicalConfig: config, physicalInventory: null,
+    ...(thermal ? { thermal } : {}),
     seed,
     randomState: initialRandomState(seed),
     tick: 0,
@@ -427,6 +436,7 @@ export function stepWorld(world: World): void {
     }
   }
   for (const hearth of world.structures) processHearth(world, hearth);
+  if (world.thermal) processThermalContacts(world);
   // Remove depleted deposits to avoid accumulating inactive objects.
   world.deposits = world.deposits.filter((deposit) => deposit.amount > 0);
 }
