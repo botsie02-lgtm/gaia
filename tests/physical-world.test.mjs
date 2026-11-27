@@ -144,3 +144,36 @@ test('deposit to agent to hub to hearth preserves sample IDs, mass, temperature 
   assert.equal(h.fuel,HEARTH_COST.wood);
   assert.deepEqual(totals(w),initial);
 });
+
+test('late physical transaction failure rolls back staged split and transfer without skill or event publication', () => {
+  const w=createWorld(42,{resourceMode:'physical'});
+  const a=w.agents[0], d=w.deposits.find(d=>d.amount>=3);
+  at(a,d);
+  const inventory=w.physicalInventory;
+  const transact=inventory.transact.bind(inventory);
+  const original=inventory.snapshot();
+  const previousEnergy=a.energy;
+  const previousSkill=a.skills.gathering;
+  const previousHistory=w.history.snapshot();
+  // Fault injection at the real transaction boundary: the first operations
+  // stage a valid split and transfer, then the unknown sample causes rollback.
+  inventory.transact=(revision,operations)=>transact(revision,[...operations,{
+    kind:'transfer',sampleId:Number.MAX_SAFE_INTEGER,
+    fromOwnerId:resourceOwnerId('deposit',d.id),toOwnerId:resourceOwnerId('agent',a.id)
+  }]);
+  try {
+    harvest(w,a,d);
+    assert.deepEqual(inventory.snapshot(),original);
+    assert.deepEqual(w.history.snapshot(),previousHistory);
+    assert.deepEqual(a.skills.gathering,previousSkill);
+    assert.equal(a.energy,previousEnergy);
+    assert.equal(a.cargo.wood+a.cargo.stone,0);
+    assert.equal(w.stats.woodHarvested+w.stats.stoneHarvested,0);
+  } finally {
+    delete inventory.transact;
+  }
+  harvest(w,a,d);
+  assert.equal(inventory.revision,original.revision+1);
+  assert.equal(a.skills.gathering.attempts,1);
+  assert.equal(w.history.query({kind:'resource.harvested'}).length,1);
+});
