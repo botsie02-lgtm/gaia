@@ -16,6 +16,12 @@ import type { ResourceTransferReceipt } from './resource-actions/index.js';
 
 import { createThermalState, processThermalContacts } from './environment/index.js';
 import type { ThermalConfig } from './environment/index.js';
+import { DEFAULT_THERMAL_CONFIG } from './environment/index.js';
+import { createBiologicalState } from './biology/index.js';
+import { createWorldBiology, resolved, completeAgentTick } from './world-biology.js';
+import type { WorldBiologyOptions, ResolvedAction } from './world-biology.js';
+export type { ResolvedAction } from './world-biology.js';
+export const DEFAULT_TICK_DURATION_SECONDS = DEFAULT_THERMAL_CONFIG.tickDurationSeconds;
 
 export const WIDTH = 52;
 export const HEIGHT = 34;
@@ -33,6 +39,9 @@ export const GATHERING_SKILL: SkillConfig = Object.freeze({
 });
 
 export interface WorldOptions {
+  readonly tickDurationSeconds?: number;
+  /** Disabled by default. True uses explicit scenario defaults. */
+  readonly biology?: boolean | WorldBiologyOptions;
   /** Omit or false to preserve existing behavior; true uses scenario defaults. */
   readonly thermal?: boolean | Partial<ThermalConfig>;
   readonly resourceMode?: ResourceMode;
@@ -70,16 +79,26 @@ export function createWorld(seed = 12345, options: WorldOptions = {}): World {
   const resourceMode = options.resourceMode ?? 'legacy';
   if (resourceMode !== 'legacy' && resourceMode !== 'physical') throw new RangeError('Unknown resource mode');
   const config = resourceMode === 'physical' ? physicalConfig(options.kgPerUnit, options.initialTemperatureC) : null;
-  const thermal = options.thermal === undefined || options.thermal === false ? undefined :
-    createThermalState(options.thermal === true ? {} : options.thermal);
+  const thermalOptions = options.thermal === undefined || options.thermal === false ? undefined :
+    options.thermal === true ? {} : options.thermal;
+  const thermalDuration = thermalOptions?.tickDurationSeconds;
+  const tickDurationSeconds = options.tickDurationSeconds ?? thermalDuration ?? DEFAULT_TICK_DURATION_SECONDS;
+  if (!Number.isFinite(tickDurationSeconds) || tickDurationSeconds <= 0) throw new RangeError('Invalid World tick duration');
+  if (thermalDuration !== undefined && thermalDuration !== tickDurationSeconds) throw new RangeError('Conflicting World and thermal tick durations');
+  const thermal = thermalOptions === undefined ? undefined :
+    createThermalState({ ...thermalOptions, tickDurationSeconds });
   if (thermal && resourceMode !== 'physical') throw new RangeError('Thermal mode requires physical resources');
+  const biology = options.biology === undefined || options.biology === false ? undefined :
+    createWorldBiology(options.biology === true ? {} : options.biology);
   const width = WIDTH;
   const height = HEIGHT;
   const hub = { x: Math.floor(width / 2), y: Math.floor(height / 2) };
   const world: World = {
     agentMode, perceptionRange, memoryCapacity,
     resourceMode, physicalConfig: config, physicalInventory: null,
+    tickDurationSeconds,
     ...(thermal ? { thermal } : {}),
+    ...(biology ? { biology } : {}),
     seed,
     randomState: initialRandomState(seed),
     tick: 0,
@@ -123,11 +142,16 @@ export function createWorld(seed = 12345, options: WorldOptions = {}): World {
       resting: false,
       cargo: { wood: 0, stone: 0 },
       skills: { gathering: createSkillRecord(gatheringSkillConfig) },
+      ...(biology ? { biology: createBiologicalState(biology.initial) } : {}),
     };
     world.agents.push(agent);
   }
   // Allocate after agents so their existing IDs/parity (and decisions) stay unchanged.
   world.hub.id = world.nextEntityId++;
+  Object.defineProperty(world, 'tickDurationSeconds', { value: tickDurationSeconds, enumerable: true,
+    configurable: false, writable: false });
+  if (biology) Object.defineProperty(world, 'biology', { value: biology, enumerable: true,
+    configurable: false, writable: false });
   if (resourceMode === 'physical') initializePhysicalWorld(world);
   return world;
 }
@@ -194,12 +218,21 @@ export function nextStep(world: World, origin: Position, target: Position): Posi
   return { x: current % world.width, y: Math.floor(current / world.width) };
 }
 
-function goTo(world: World, agent: Agent, destination: Position): void {
+function goTo(world: World, agent: Agent, destination: Position): ResolvedAction {
   const step = nextStep(world, agent, destination);
-  if (!step) return;
-  agent.x = step.x;
-  agent.y = step.y;
+  if (!step) return resolved(world, agent, 'move', 'rejected', 'no-route');
+  return moveAgent(world, agent, step);
+}
+
+function moveAgent(world: World, agent: Agent, to: Readonly<Position>): ResolvedAction {
+  const { x, y } = to;
+  if (!Number.isSafeInteger(x) || !Number.isSafeInteger(y) ||
+      Math.abs(x-agent.x) + Math.abs(y-agent.y) !== 1 || !passable(world,x,y))
+    return resolved(world, agent, 'move', 'rejected', 'invalid-step');
+  agent.x = x;
+  agent.y = y;
   agent.energy = Math.max(0, agent.energy - 1);
+  return resolved(world, agent, 'move');
 }
 
 function chooseMaterial(world: World, agent: Agent): Material | null {
@@ -240,14 +273,16 @@ function restIfNeeded(agent: Agent): boolean {
   return false;
 }
 
-function deliverCargo(world: World, agent: Agent): void {
-  if (agent.x !== world.hub.x || agent.y !== world.hub.y || cargoCount(agent) <= 0) return;
+function deliverCargo(world: World, agent: Agent): ResolvedAction {
+  if (agent.x !== world.hub.x || agent.y !== world.hub.y || cargoCount(agent) <= 0)
+    return resolved(world, agent, 'deliver', 'rejected', 'not-at-hub-or-empty');
     const delivered = { ...agent.cargo };
     let receipt: ResourceTransferReceipt | undefined;
     if (world.resourceMode === 'physical') {
-      if (!world.agents.includes(agent) || !validPhysicalPosition(world, agent)) return;
+      if (!world.agents.includes(agent) || !validPhysicalPosition(world, agent))
+        return resolved(world, agent, 'deliver', 'rejected', 'invalid-agent');
       receipt = movePhysical(world, resourceOwnerId('agent', agent.id), resourceOwnerId('hub', world.hub.id), delivered);
-      if (!receipt) return;
+      if (!receipt) return resolved(world, agent, 'deliver', 'rejected', 'transaction-failed');
     } else {
       world.inventory.wood += delivered.wood;
       world.inventory.stone += delivered.stone;
@@ -257,24 +292,26 @@ function deliverCargo(world: World, agent: Agent): void {
       tick: world.tick, kind: 'stockpile.delivered', actorId: agent.id, targetId: world.hub.id,
       details: { wood: delivered.wood, stone: delivered.stone, unit: 'prototype-unit', ...physicalDetails(receipt) },
     });
-    return;
+    return resolved(world, agent, 'deliver');
 }
 
 function validPhysicalPosition(world: World, position: Position): boolean {
   return Number.isSafeInteger(position.x) && Number.isSafeInteger(position.y) && passable(world, position.x, position.y);
 }
 
-function harvest(world: World, agent: Agent, deposit: Deposit): void {
+function harvest(world: World, agent: Agent, deposit: Deposit): ResolvedAction {
   if (deposit.x !== agent.x || deposit.y !== agent.y || deposit.amount < 1 ||
-      cargoCount(agent) >= CARGO_LIMIT) return;
+      cargoCount(agent) >= CARGO_LIMIT)
+    return resolved(world, agent, 'harvest', 'rejected', 'unavailable-or-capacity');
   const material = deposit.material;
     let receipt: ResourceTransferReceipt | undefined;
     if (world.resourceMode === 'physical') {
       if (!world.agents.includes(agent) || !world.deposits.includes(deposit) ||
-          !validPhysicalPosition(world, agent) || cargoCount(agent) + 1 > CARGO_LIMIT) return;
+          !validPhysicalPosition(world, agent) || cargoCount(agent) + 1 > CARGO_LIMIT)
+        return resolved(world, agent, 'harvest', 'rejected', 'invalid-agent-or-capacity');
       receipt = movePhysical(world, resourceOwnerId('deposit', deposit.id), resourceOwnerId('agent', agent.id),
         { wood: material === 'wood' ? 1 : 0, stone: material === 'stone' ? 1 : 0 });
-      if (!receipt) return;
+      if (!receipt) return resolved(world, agent, 'harvest', 'rejected', 'transaction-failed');
     } else {
       deposit.amount -= 1;
       agent.cargo[material] += 1;
@@ -303,33 +340,30 @@ function harvest(world: World, agent: Agent, deposit: Deposit): void {
         details: { skillId: config.skillId, attempts, proficiency: update.record.proficiency },
       });
     }
-    return;
+    return resolved(world, agent, 'harvest');
 }
 
 /** Resolve only the requested local action; never substitute a hidden goal. */
-export function executeAgentAction(world: World, agent: Agent, action: AgentAction): void {
-  if (world.resourceMode === 'physical' && (!world.agents.includes(agent) || !validPhysicalPosition(world, agent))) return;
-  if (restIfNeeded(agent)) return;
+export function executeAgentAction(world: World, agent: Agent, action: AgentAction): ResolvedAction {
+  if ((world.resourceMode === 'physical' || world.biology) &&
+      (!world.agents.includes(agent) || !validPhysicalPosition(world, agent)))
+    return resolved(world, agent, action.kind, 'rejected', 'invalid-agent');
+  if (restIfNeeded(agent)) return resolved(world, agent, action.kind, 'rest',
+    action.kind === 'rest' ? undefined : 'mandatory-rest');
   switch (action.kind) {
-    case 'move': {
-      const { x, y } = action.to;
-      if (!Number.isSafeInteger(x) || !Number.isSafeInteger(y) ||
-          Math.abs(x-agent.x) + Math.abs(y-agent.y) !== 1 || !passable(world,x,y)) return;
-      agent.x = x;
-      agent.y = y;
-      agent.energy = Math.max(0, agent.energy - 1);
-      return;
-    }
+    case 'move': return moveAgent(world, agent, action.to);
     case 'harvest': {
       const deposit = world.deposits.find(d => d.id === action.targetId);
-      if (deposit) harvest(world, agent, deposit);
-      return;
+      return deposit ? harvest(world, agent, deposit) :
+        resolved(world, agent, 'harvest', 'rejected', 'unknown-deposit');
     }
     case 'deliver':
-      if (action.targetId === world.hub.id) deliverCargo(world, agent);
-      return;
+      return action.targetId === world.hub.id ? deliverCargo(world, agent) :
+        resolved(world, agent, 'deliver', 'rejected', 'wrong-hub');
     case 'rest':
-    case 'idle': return;
+      // Preserve legacy rest gating: a request alone is not confirmed rest.
+      return resolved(world, agent, 'rest', 'rejected', 'rest-not-required');
+    case 'idle': return resolved(world, agent, 'idle');
   }
 }
 
@@ -344,30 +378,29 @@ function knowledgeTick(world: World): void {
       Object.freeze({ energy: agent.energy, resting: agent.resting, cargo: Object.freeze({ ...agent.cargo }) }),
       Object.freeze({ width: world.width, height: world.height, cargoLimit: CARGO_LIMIT }));
   }
-  for (const agent of agents) if (agent.decision) executeAgentAction(world, agent, agent.decision.action);
+  for (const agent of agents) {
+    const outcome = agent.decision ? executeAgentAction(world, agent, agent.decision.action) :
+      resolved(world, agent, 'idle');
+    completeAgentTick(world, agent, outcome);
+  }
 }
 
-function act(world: World, agent: Agent): void {
-  if (world.resourceMode === 'physical' && !validPhysicalPosition(world, agent)) return;
-  if (restIfNeeded(agent)) return;
+function act(world: World, agent: Agent): ResolvedAction {
+  if ((world.resourceMode === 'physical' || world.biology) && !validPhysicalPosition(world, agent))
+    return resolved(world, agent, 'idle', 'rejected', 'invalid-agent');
+  if (restIfNeeded(agent)) return resolved(world, agent, 'rest');
 
   const carrying = cargoCount(agent);
   const atHub = agent.x === world.hub.x && agent.y === world.hub.y;
-  if (atHub && carrying > 0) { deliverCargo(world, agent); return; }
-  if (carrying >= CARGO_LIMIT) {
-    goTo(world, agent, world.hub);
-    return;
-  }
+  if (atHub && carrying > 0) return deliverCargo(world, agent);
+  if (carrying >= CARGO_LIMIT) return goTo(world, agent, world.hub);
 
   const material = chooseMaterial(world, agent);
-  if (!material) return;
+  if (!material) return resolved(world, agent, 'idle');
   const deposit = nearestDeposit(world, agent, material);
-  if (!deposit) {
-    if (carrying > 0) goTo(world, agent, world.hub);
-    return;
-  }
-  if (deposit.x === agent.x && deposit.y === agent.y) { harvest(world, agent, deposit); return; }
-  goTo(world, agent, deposit);
+  if (!deposit) return carrying > 0 ? goTo(world, agent, world.hub) : resolved(world, agent, 'idle');
+  if (deposit.x === agent.x && deposit.y === agent.y) return harvest(world, agent, deposit);
+  return goTo(world, agent, deposit);
 }
 
 function processHearth(world: World, hearth: Hearth): void {
@@ -399,7 +432,8 @@ export function stepWorld(world: World): void {
   world.tick++;
   if (world.agentMode === 'knowledge') knowledgeTick(world);
   else for (const agent of world.resourceMode === 'physical' ?
-    [...world.agents].sort((a,b) => a.id-b.id) : world.agents) act(world, agent);
+    [...world.agents].sort((a,b) => a.id-b.id) : world.agents)
+    completeAgentTick(world, agent, act(world, agent));
 
   if (world.structures.length === 0 &&
       world.inventory.wood >= HEARTH_COST.wood &&

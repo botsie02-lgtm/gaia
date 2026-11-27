@@ -2,6 +2,7 @@ import './style.css';
 import { createWorld, stepWorld } from './sim/world.js';
 import { drawWorld, TILE } from './ui/draw.js';
 import type { World } from './sim/model.js';
+import { rankMotivations } from './sim/biology/index.js';
 import { resourceOwnerId } from './sim/resource-actions/index.js';
 import type { OwnerKind } from './sim/resource-actions/index.js';
 
@@ -22,6 +23,8 @@ app.innerHTML = `
       <label>Agent policy <select id="agent-policy"><option value="knowledge" selected>Knowledge-limited</option><option value="legacy">Legacy</option></select></label>
       <label>Resources <select id="resource-mode"><option value="physical" selected>Physical matter</option><option value="legacy">Legacy units</option></select></label>
       <label><input id="thermal" type="checkbox" /> Thermal contacts (physical)</label>
+      <label>Biology <select id="biology"><option value="off" selected>Disabled</option><option value="on">Needs (no food / water)</option></select></label>
+      <label>Modeled seconds / tick <select id="tick-duration"><option value="1" selected>1</option><option value="60">60 (accelerated)</option><option value="300">300 (accelerated)</option><option value="3600">3600 (test)</option></select></label>
       <label><input id="visibility" type="checkbox" /> Selected agent sight</label>
       <button id="reset" class="secondary">Regenerate</button>
     </div>
@@ -29,7 +32,7 @@ app.innerHTML = `
     <section class="panel"><div class="section-label">SIMULATION</div><div id="stats" class="stats"></div></section>
     <section class="panel"><div class="section-label">INSPECTOR</div><div id="inspector" class="inspector">Click a tile to inspect its terrain and entities.</div></section>
     <section class="panel"><div class="section-label">RECENT EVENTS</div><div id="recent-events" class="inspector">No events yet.</div><p class="small" id="history-count"></p></section>
-    <section class="panel"><div class="section-label">RULES IN EFFECT</div><p>Agents choose resources, gather finite deposits, return cargo to the hub, rest when tired, and construct a hearth from wood and stone.</p><p id="hearth-rule"></p><p class="small">This is an abstract material process, not atomic physics or a learned intelligence system yet.</p></section>
+    <section class="panel"><div class="section-label">RULES IN EFFECT</div><p>Agents choose resources, gather finite deposits, return cargo to the hub, rest when tired, and construct a hearth from wood and stone.</p><p id="hearth-rule"></p><p id="biology-rule" class="small"></p><p class="small">This is an abstract material process, not atomic physics or a learned intelligence system yet.</p></section>
     <section class="panel legend"><div class="section-label">LEGEND</div><div><span class="mark wood"></span>Wood <span class="mark stone"></span>Stone <span class="mark agent"></span>Agent <span class="mark hearth"></span>Hearth</div></section>
   </aside></main>
   <footer>GAIA simulation prototype 0.2 · deterministic fixed-step core · browser is a viewer</footer>`;
@@ -57,8 +60,11 @@ const resourceSelect = get<HTMLSelectElement>('resource-mode');
 const chosenResourceMode = () => resourceSelect.value === 'legacy' ? 'legacy' as const : 'physical' as const;
 const thermalSelect = get<HTMLInputElement>('thermal');
 const chosenThermal = () => chosenResourceMode() === 'physical' && thermalSelect.checked;
+const biologySelect = get<HTMLSelectElement>('biology');
+const durationSelect = get<HTMLSelectElement>('tick-duration');
+const chosenBiology = () => biologySelect.value === 'on';
 const chosenMode = () => policySelect.value === 'legacy' ? 'legacy' as const : 'knowledge' as const;
-let world: World = createWorld(12345, { agentMode: chosenMode(), resourceMode: chosenResourceMode(), thermal: chosenThermal() });
+let world: World = createWorld(12345, { agentMode: chosenMode(), resourceMode: chosenResourceMode(), thermal: chosenThermal(), biology: chosenBiology(), tickDurationSeconds: Number(durationSelect.value) });
 let selectedAgentId: number | null = null;
 let running = true;
 let selected: { x: number; y: number } | null = null;
@@ -107,9 +113,23 @@ function inspect(): void {
   const structures = world.structures.filter((p) => p.x === x && p.y === y);
   const lines = [`Tile (${x}, ${y}) · ${terrain}`];
   for (const deposit of deposits) lines.push(`${deposit.material} deposit #${deposit.id}: ${deposit.amount} remaining`);
-  for (const agent of agents) lines.push(`${agent.faction} #${agent.id}: energy ${agent.energy.toFixed(0)}, cargo ${agent.cargo.wood} wood / ${agent.cargo.stone} stone${agent.resting ? ' (resting)' : ''}`);
+  for (const agent of agents) lines.push(`${agent.faction} #${agent.id}: abstract energy ${agent.energy.toFixed(0)}, cargo ${agent.cargo.wood} wood / ${agent.cargo.stone} stone${agent.resting ? ' (resting)' : ''}`);
   for (const agent of agents) {
     const skill = agent.skills.gathering;
+    if (agent.lastOutcome) {
+      const o = agent.lastOutcome;
+      lines.push('  Resolved tick ' + o.tick + ': ' + o.requested + ' → ' + o.kind +
+        ' (' + o.status + (o.reason ? '; ' + o.reason : '') + ')');
+    }
+    if (agent.biology && world.biology) {
+      const b = agent.biology;
+      const percent = (n: number) => (n * 100).toFixed(2) + '%';
+      lines.push('  Hunger ' + percent(b.hunger) + ' · Thirst ' + percent(b.thirst),
+        '  Fatigue ' + percent(b.fatigue) + ' · Condition ' + percent(b.condition),
+        '  Motivation ranking (not decisions): ' + rankMotivations(b, world.biology.config)
+          .map(m => m.kind + ' ' + percent(m.urgency)).join(' > '),
+        '  No feeding/drinking available; condition zero is not death.');
+    }
     if (world.agentMode === 'knowledge') {
       const obs = agent.observation;
       lines.push('  Intention: ' + (agent.decision?.intention ?? 'Awaiting first tick'));
@@ -151,16 +171,20 @@ function render(): void {
   get<HTMLParagraphElement>('hearth-rule').textContent = world.resourceMode === 'physical' ?
     'Physical hearth retains fuel; combustion and abstract heat are disabled.' :
     'Once built, the hearth burns wood to generate and lose abstract heat over time.';
+  get<HTMLParagraphElement>('biology-rule').textContent = world.biology ?
+    'Incomplete deprivation scenario: no food or water consumption, no death or motivation-driven actions. Abstract energy still controls rest.' : '';
   stats.innerHTML = [
+    ['Biological needs', world.biology ? 'Enabled (deprivation)' : 'Disabled'],
+    ['Modeled seconds / tick', world.tickDurationSeconds],
+    ['Modeled elapsed seconds', world.tick * world.tickDurationSeconds],
     ['Resource mode', world.resourceMode],
     ['Thermal contacts', world.thermal ? 'Enabled' : 'Disabled'],
     ...(world.thermal ? [
-      ['Modeled seconds / tick', world.thermal.config.tickDurationSeconds],
       ['Contact conductance (W/K)', world.thermal.config.conductanceWPerK],
       ['Contacts / tick budget', world.thermal.config.maxContactsPerTick],
       ['Event threshold (J)', world.thermal.config.eventThresholdJ],
     ] : []),
-    ['Agents', world.agents.length], ['Average energy', `${average.toFixed(0)} / 100`],
+    ['Agents', world.agents.length], ['Average abstract energy', `${average.toFixed(0)} / 100`],
     ['Wood stored', world.inventory.wood], ['Stone stored', world.inventory.stone],
     ['Wood harvested', world.stats.woodHarvested], ['Stone harvested', world.stats.stoneHarvested],
     ['Hearths', world.stats.hearthsBuilt],
@@ -198,7 +222,7 @@ get<HTMLButtonElement>('step').addEventListener('click', () => {
 function regenerate(): void {
   const seed = Number(seedInput.value);
   if (!Number.isFinite(seed)) { seedInput.value = '12345'; return; }
-  world = createWorld(Math.trunc(seed), { agentMode: chosenMode(), resourceMode: chosenResourceMode(), thermal: chosenThermal() });
+  world = createWorld(Math.trunc(seed), { agentMode: chosenMode(), resourceMode: chosenResourceMode(), thermal: chosenThermal(), biology: chosenBiology(), tickDurationSeconds: Number(durationSelect.value) });
   selectedAgentId = null;
   selected = null;
   inspector.textContent = 'Click a tile to inspect its terrain and entities.';
@@ -212,6 +236,8 @@ resourceSelect.addEventListener('change', () => {
   regenerate();
 });
 thermalSelect.addEventListener('change', regenerate);
+biologySelect.addEventListener('change', regenerate);
+durationSelect.addEventListener('change', regenerate);
 visibility.addEventListener('change', render);
 canvas.addEventListener('click', (event) => {
   const rect = canvas.getBoundingClientRect();

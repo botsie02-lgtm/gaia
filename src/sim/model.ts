@@ -15,7 +15,14 @@ export type Faction = 'settler' | 'neutral' | 'hostile';
 export type Position = { x: number; y: number };
 export type Inventory = Record<Material, number>;
 
+import type { BiologicalState } from './biology/index.js';
+import type { WorldBiologyConfig, ResolvedAction } from './world-biology.js';
+
 export interface Agent extends Position {
+  /** Independent physiological state; absent when biology is disabled. */
+  biology?: BiologicalState;
+  /** Last completed tick, not an intention or direct executor call. */
+  lastOutcome?: ResolvedAction;
   id: number;
   kind: 'agent';
   faction: Faction;
@@ -49,6 +56,9 @@ export interface Hearth extends Position {
 import type { ThermalState } from './environment/index.js';
 
 export interface World {
+  /** Authoritative modeled time per logical tick, independent of playback speed. */
+  readonly tickDurationSeconds: number;
+  readonly biology?: WorldBiologyConfig;
   readonly thermal?: ThermalState;
   readonly resourceMode: ResourceMode;
   readonly physicalConfig: PhysicalResourceConfig | null;
