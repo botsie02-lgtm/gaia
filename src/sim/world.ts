@@ -4,6 +4,11 @@ import { EventLedger } from './history/events.js';
 import { applyPracticeOutcome, createSkillRecord } from './skills/index.js';
 import type { SkillConfig } from './skills/index.js';
 
+import { AgentMemory, DEFAULT_MEMORY_CAPACITY } from './memory/index.js';
+import { observeAgent, DEFAULT_PERCEPTION_RANGE } from './perception/index.js';
+import { decideAgent } from './agents/index.js';
+import type { AgentMode, AgentAction } from './agents/index.js';
+
 export const WIDTH = 52;
 export const HEIGHT = 34;
 export const AGENT_COUNT = 14;
@@ -20,6 +25,9 @@ export const GATHERING_SKILL: SkillConfig = Object.freeze({
 });
 
 export interface WorldOptions {
+  readonly agentMode?: AgentMode;
+  readonly perceptionRange?: number;
+  readonly memoryCapacity?: number;
   readonly eventCapacity?: number;
   readonly gatheringMilestones?: readonly number[];
 }
@@ -40,10 +48,17 @@ export function createWorld(seed = 12345, options: WorldOptions = {}): World {
   });
   // Validate once before generating terrain; each agent gets its own record below.
   createSkillRecord(gatheringSkillConfig);
+  const agentMode = options.agentMode ?? 'legacy';
+  const perceptionRange = options.perceptionRange ?? DEFAULT_PERCEPTION_RANGE;
+  const memoryCapacity = options.memoryCapacity ?? DEFAULT_MEMORY_CAPACITY;
+  if (agentMode !== 'legacy' && agentMode !== 'knowledge') throw new RangeError('Unknown agent mode');
+  if (!Number.isSafeInteger(perceptionRange) || perceptionRange < 0 ||
+      !Number.isSafeInteger(memoryCapacity) || memoryCapacity < 1) throw new RangeError('Invalid knowledge configuration');
   const width = WIDTH;
   const height = HEIGHT;
   const hub = { x: Math.floor(width / 2), y: Math.floor(height / 2) };
   const world: World = {
+    agentMode, perceptionRange, memoryCapacity,
     seed,
     randomState: initialRandomState(seed),
     tick: 0,
@@ -77,6 +92,7 @@ export function createWorld(seed = 12345, options: WorldOptions = {}): World {
   for (let i = 0; i < AGENT_COUNT; i++) {
     const agent: Agent = {
       id: world.nextEntityId++,
+      memory: new AgentMemory(world.nextEntityId - 1, memoryCapacity),
       kind: 'agent',
       faction: 'settler',
       x: hub.x + (i % 5) - 2,
@@ -190,17 +206,19 @@ function nearestDeposit(world: World, agent: Agent, material: Material): Deposit
   return nearest;
 }
 
-function act(world: World, agent: Agent): void {
+/** All modes share the same authoritative state changes and event publication. */
+function restIfNeeded(agent: Agent): boolean {
   if (agent.energy <= 12) agent.resting = true;
   if (agent.resting) {
     agent.energy = Math.min(100, agent.energy + 5);
     if (agent.energy >= 70) agent.resting = false;
-    return;
+    return true;
   }
+  return false;
+}
 
-  const carrying = cargoCount(agent);
-  const atHub = agent.x === world.hub.x && agent.y === world.hub.y;
-  if (atHub && carrying > 0) {
+function deliverCargo(world: World, agent: Agent): void {
+  if (agent.x !== world.hub.x || agent.y !== world.hub.y || cargoCount(agent) <= 0) return;
     const delivered = agent.cargo;
     world.inventory.wood += delivered.wood;
     world.inventory.stone += delivered.stone;
@@ -210,20 +228,12 @@ function act(world: World, agent: Agent): void {
       details: { wood: delivered.wood, stone: delivered.stone, unit: 'prototype-unit' },
     });
     return;
-  }
-  if (carrying >= CARGO_LIMIT) {
-    goTo(world, agent, world.hub);
-    return;
-  }
+}
 
-  const material = chooseMaterial(world, agent);
-  if (!material) return;
-  const deposit = nearestDeposit(world, agent, material);
-  if (!deposit) {
-    if (carrying > 0) goTo(world, agent, world.hub);
-    return;
-  }
-  if (deposit.x === agent.x && deposit.y === agent.y) {
+function harvest(world: World, agent: Agent, deposit: Deposit): void {
+  if (deposit.x !== agent.x || deposit.y !== agent.y || deposit.amount < 1 ||
+      cargoCount(agent) >= CARGO_LIMIT) return;
+  const material = deposit.material;
     deposit.amount -= 1;
     agent.cargo[material] += 1;
     agent.energy = Math.max(0, agent.energy - 1);
@@ -251,7 +261,67 @@ function act(world: World, agent: Agent): void {
       });
     }
     return;
+}
+
+/** Resolve only the requested local action; never substitute a hidden goal. */
+export function executeAgentAction(world: World, agent: Agent, action: AgentAction): void {
+  if (restIfNeeded(agent)) return;
+  switch (action.kind) {
+    case 'move': {
+      const { x, y } = action.to;
+      if (!Number.isSafeInteger(x) || !Number.isSafeInteger(y) ||
+          Math.abs(x-agent.x) + Math.abs(y-agent.y) !== 1 || !passable(world,x,y)) return;
+      agent.x = x;
+      agent.y = y;
+      agent.energy = Math.max(0, agent.energy - 1);
+      return;
+    }
+    case 'harvest': {
+      const deposit = world.deposits.find(d => d.id === action.targetId);
+      if (deposit) harvest(world, agent, deposit);
+      return;
+    }
+    case 'deliver':
+      if (action.targetId === world.hub.id) deliverCargo(world, agent);
+      return;
+    case 'rest':
+    case 'idle': return;
   }
+}
+
+/** Take every observation before any action; contested requests resolve by ID. */
+function knowledgeTick(world: World): void {
+  const agents = [...world.agents].sort((a,b) => a.id-b.id);
+  for (const agent of agents) {
+    const observation = observeAgent(world, agent.id, { range: world.perceptionRange });
+    const memory = agent.memory.update(observation);
+    agent.observation = observation;
+    agent.decision = decideAgent(observation, memory,
+      Object.freeze({ energy: agent.energy, resting: agent.resting, cargo: Object.freeze({ ...agent.cargo }) }),
+      Object.freeze({ width: world.width, height: world.height, cargoLimit: CARGO_LIMIT }));
+  }
+  for (const agent of agents) if (agent.decision) executeAgentAction(world, agent, agent.decision.action);
+}
+
+function act(world: World, agent: Agent): void {
+  if (restIfNeeded(agent)) return;
+
+  const carrying = cargoCount(agent);
+  const atHub = agent.x === world.hub.x && agent.y === world.hub.y;
+  if (atHub && carrying > 0) { deliverCargo(world, agent); return; }
+  if (carrying >= CARGO_LIMIT) {
+    goTo(world, agent, world.hub);
+    return;
+  }
+
+  const material = chooseMaterial(world, agent);
+  if (!material) return;
+  const deposit = nearestDeposit(world, agent, material);
+  if (!deposit) {
+    if (carrying > 0) goTo(world, agent, world.hub);
+    return;
+  }
+  if (deposit.x === agent.x && deposit.y === agent.y) { harvest(world, agent, deposit); return; }
   goTo(world, agent, deposit);
 }
 
@@ -280,7 +350,8 @@ function processHearth(world: World, hearth: Hearth): void {
 /** Fixed-step, deterministic simulation. No Date.now/Math.random/DOM access. */
 export function stepWorld(world: World): void {
   world.tick++;
-  for (const agent of world.agents) act(world, agent);
+  if (world.agentMode === 'knowledge') knowledgeTick(world);
+  else for (const agent of world.agents) act(world, agent);
 
   if (world.structures.length === 0 &&
       world.inventory.wood >= HEARTH_COST.wood &&
