@@ -92,3 +92,15 @@ entities, confidence decay, causal reasoning, long-term experience log,
 skill learning, communication, collective knowledge or intelligence claims.
 Future controllers should take consistent observations at logical tick
 boundaries and persist individual memories with their corresponding world.
+
+
+## Navigation retention (Developer 15)
+
+The original two-argument constructor and recency ordering remain available.
+An explicit third argument `'navigation'` enables bounded salience retention.
+Knowledge Worlds select it when capacity is 64 entries or fewer; larger
+capacities and legacy Worlds retain the original policy. Snapshot version 1
+adds an optional retention discriminator and optional lastVisitedTick only
+on terrain entries, marking a genuine self-position observation. The metadata
+is lost when that terrain entry is evicted; there is no separate visited map.
+Restore validates it and preserves canonical query ordering. See NAVIGATION.md.

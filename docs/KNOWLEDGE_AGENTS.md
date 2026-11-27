@@ -70,3 +70,16 @@ is not implemented. AgentMemory.fromSnapshot restores memory alone. Future work:
 profile and index sensing, improve exploration/retention, persist world snapshots,
 add action feedback and deliberate knowledge sharing, integrate physical resource
 transactions separately. No dependency on Developer 12.
+
+
+## Constrained navigation (Developer 15)
+
+For knowledge Worlds with capacity <=64, memory preferentially retains an
+observed hub and a passable corridor toward the observer, plus recent visited
+terrain and productive deposits. On exploratory fallback only, frontier
+ranking penalizes recently visited first steps and, when carrying material,
+favors proximity to a remembered hub. All routes still use the current
+projection and retained terrain only. Normal reachable resource and hub
+actions are unchanged, including legitimate hauling reversals. Larger
+memories retain the original selection rules. See NAVIGATION.md for results,
+configuration choices, snapshot compatibility and limitations.
