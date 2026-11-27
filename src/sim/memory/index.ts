@@ -15,6 +15,8 @@ export interface MemoryEntry<T extends MemoryValue = MemoryValue> {
   readonly lastCheckedTick: number;
   /** Own observed visit; attached to a retained terrain entry, not a second map. */
   readonly lastVisitedTick?: number;
+  /** First locally observed own position; counted as an ordinary terrain entry. */
+  readonly searchOrigin?: true;
 }
 
 export interface MemorySnapshot {
@@ -110,9 +112,10 @@ function key(value: MemoryValue): string {
 }
 
 function entry(value: MemoryValue, status: MemoryStatus, lastObservedTick: number,
-  lastCheckedTick: number, lastVisitedTick?: number): MemoryEntry {
+  lastCheckedTick: number, lastVisitedTick?: number, searchOrigin?: true): MemoryEntry {
   return Object.freeze({ value, status, lastObservedTick, lastCheckedTick,
-    ...(lastVisitedTick === undefined ? {} : { lastVisitedTick }) });
+    ...(lastVisitedTick === undefined ? {} : { lastVisitedTick }),
+    ...(searchOrigin === true ? { searchOrigin } : {}) });
 }
 
 /** Newest evidence first; ties favor entities, then numeric ID or row-major tile. */
@@ -186,6 +189,7 @@ function retainNavigation(entries: MemoryEntry[], observation: Observation, capa
     .sort(compare)[0];
   add(hub);
   add(terrain.get(tileKey(origin)));
+  if (recovery && !hub) add(entries.find(e => e.searchOrigin === true));
   if (hub) {
     const start = tileKey(hub.value);
     const root = terrain.get(start);
@@ -307,6 +311,10 @@ export class AgentMemory {
     const oldVisits = this.#retention === 'navigation'
       ? new Map(this.#entries.filter(e => e.lastVisitedTick !== undefined)
         .map(e => [key(e.value), e.lastVisitedTick])) : undefined;
+    const recovery = this.#retention === 'navigation' && searchEnabled(observation, this.capacity);
+    const originKey = this.#entries.find(e => e.searchOrigin === true);
+    const anchor = recovery ? (originKey ? key(originKey.value) :
+      this.#searchPressure === undefined ? 'tile:' + tileKey(observation.observer) : undefined) : undefined;
     for (const old of this.#entries) {
       const fresh = seen.get(key(old.value));
       if (fresh) {
@@ -316,7 +324,7 @@ export class AgentMemory {
       if (old.value.kind !== 'terrain' && seen.has('tile:' + tileKey(old.value))) {
         next.push(entry(old.value, 'absent', old.lastObservedTick, tick));
       } else if (old.status === 'current') {
-        next.push(entry(old.value, 'stale', old.lastObservedTick, old.lastCheckedTick, old.lastVisitedTick));
+        next.push(entry(old.value, 'stale', old.lastObservedTick, old.lastCheckedTick, old.lastVisitedTick, old.searchOrigin));
       } else {
         next.push(old);
       }
@@ -324,7 +332,7 @@ export class AgentMemory {
     for (const value of seen.values()) {
       const visit = this.#retention === 'navigation' && value.kind === 'terrain'
         ? (tileKey(value) === tileKey(observation.observer) ? tick : oldVisits?.get(key(value))) : undefined;
-      next.push(entry(value, 'current', tick, tick, visit));
+      next.push(entry(value, 'current', tick, tick, visit, key(value) === anchor ? true : undefined));
     }
     const pressure = this.#retention === 'navigation' && searchEnabled(observation, this.capacity)
       ? updatePressure(this.#searchPressure, observation, this.capacity, this.#lastObservationTick, this.#entries)
@@ -378,6 +386,7 @@ export class AgentMemory {
     if (entries.length > memory.capacity || (tick === null && entries.length !== 0) ||
         (tick !== null && entries.length === 0)) throw new RangeError('Invalid memory size');
     const keys = new Set<string>();
+    let originSeen = false;
     const restored: MemoryEntry[] = [];
     for (const input of entries) {
       const data = record(input);
@@ -397,8 +406,14 @@ export class AgentMemory {
       if (visit !== undefined && (memory.#retention !== 'navigation' || value.kind !== 'terrain' || visit > observed)) {
         throw new RangeError('Inconsistent visit evidence');
       }
+      const anchor = data.searchOrigin;
+      if (anchor !== undefined && (anchor !== true || originSeen ||
+          memory.#retention !== 'navigation' || value.kind !== 'terrain' || visit === undefined)) {
+        throw new RangeError('Invalid search origin');
+      }
+      if (anchor === true) originSeen = true;
       keys.add(key(value));
-      restored.push(entry(value, status, observed, checked, visit));
+      restored.push(entry(value, status, observed, checked, visit, anchor === true ? true : undefined));
     }
     if (data.searchPressure !== undefined) {
       const pressure = array(data.searchPressure);
