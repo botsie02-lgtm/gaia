@@ -142,6 +142,7 @@ export function decideAgent(observation: Observation, memory: MemorySnapshot,
       const pressure = (p: Readonly<Position>): number =>
         memory.searchPressure![searchBucket(p, memory.searchPressure!.length)]!;
       const knownHome = [...hubs.values()].sort((a,b) => a.id-b.id)[0];
+      const anchor = memory.entries.find(e => e.searchOrigin === true)?.value;
       const inside = (p: Readonly<Position>): boolean =>
         p.x >= 0 && p.y >= 0 && p.x < config.width && p.y < config.height;
       const score = (route: Route): number => {
@@ -156,6 +157,12 @@ export function decideAgent(observation: Observation, memory: MemorySnapshot,
           // Pressure still allows detours around obstructions.
           return base + 2 * homeDistance(route.position) +
             0.18 * edgePressure + 0.10 * pressure(route.first!);
+        }
+        if (!knownHome && anchor && carrying > 0) {
+          // Search around a genuinely observed reference, not an assumed hub.
+          const fromAnchor = Math.abs(route.position.x-anchor.x)+Math.abs(route.position.y-anchor.y);
+          return base + 2 * Math.max(0, fromAnchor - 4) +
+            0.55 * edgePressure + 0.20 * pressure(route.first!);
         }
         const distant = knownHome ? Math.max(0,
           Math.abs(route.position.x-knownHome.x)+Math.abs(route.position.y-knownHome.y)-16) : 0;
