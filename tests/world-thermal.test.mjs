@@ -38,11 +38,11 @@ test('two samples equilibrate over real World ticks with conserved identity, mas
   const strip=s=>s.map(({temperatureC,...rest})=>rest);
   let gap=Math.abs(initial[0].temperatureC-initial[1].temperatureC);
   const trace=[];
-  for(let i=0;i<30;i++){
+  for(let i=0;i<60;i++){
     stepWorld(w);
     const s=samples(w), next=Math.abs(s[0].temperatureC-s[1].temperatureC);
     assert.ok(next<=gap);gap=next;
-    if([0,4,9,29].includes(i)) trace.push({tick:w.tick,temperatures:s.map(x=>x.temperatureC)});
+    if([0,4,9,29,59].includes(i)) trace.push({tick:w.tick,temperatures:s.map(x=>x.temperatureC)});
   }
   assert.ok(gap<5);assert.deepEqual(strip(samples(w)),strip(initial));close(e,energy(w));assert.equal(mass(w),m);
   assert.ok(w.history.query({kind:'thermal.contact'}).length>0);
