@@ -147,3 +147,38 @@ The benchmark verifies deterministic compacted snapshots, exact calibrated
 per-material masses, modeled sensible energy within 1e-12 relative, hub
 material mass and cursor/revision changes. No timing assertions, exact
 behavioural equivalence, retained-memory measurement or scalability claim.
+
+### Measured results
+
+Implementation/benchmark commit 3dbc026: 247/247 tests passed and production
+build succeeded in https://github.com/botsie02-lgtm/gaia/actions/runs/45947629875 .
+All elapsed times below are medians of three measured repetitions after warmup
+on the same CI job; ms, not simulation time.
+
+| Seed/ticks/thermal | Total samples before -> after | Hub before -> after | Pairs / batches | Consolidation ms | Lookup ms before -> after | Transfer ms before -> after |
+|---|---:|---:|---:|---:|---:|---:|
+| 2026/5000/on | 435 -> 435 | 342 -> 342 | 0 / 0 | 0.444 | 26.496 -> 26.714 | 6.714 -> 6.394 |
+| 42/200/off | 318 -> 131 | 189 -> 2 | 187 / 8 | 1.291 | 14.900 -> 0.519 | 7.372 -> 5.676 |
+| 42/200/on | 318 -> 314 | 189 -> 185 | 4 / 2 | 0.436 | 14.484 -> 14.497 | 6.926 -> 6.552 |
+
+All three cases conserved per-material mass exactly at this calibration.
+Naively summed sensible energy differences (after minus before) were
+0, 0 and +1.1920928955078125e-7 J respectively, within the model tolerance
+and attributable to floating-point summation/rounding. All three compacted
+snapshots reproduced exactly across repetitions. The thermal-disabled
+hub shrank 98.94%, total inventory 58.81%; lookup median was about 28.7x
+faster and full transfer workload about 1.30x faster. The 200 transfers
+required 800 -> 228 split/transfer operations in that case and grew the
+compacted hub from 2 to 30 live samples, showing renewed fragmentation.
+The two thermal-enabled scenarios both required 800 -> 800 operations.
+The 200-tick thermal-enabled hub shrank only 2.12%, total 1.26%;
+lookup showed no improvement. The 5000-tick thermal-enabled hub had no
+compatible pairs. Timing differences on these unchanged or near-unchanged
+workloads are not evidence of a meaningful gain.
+
+This is a conservative identity-changing storage optimization, not a
+solution to fragmentation in an actively heated hub. Do not widen the
+temperature matching criterion to manufacture a speedup. Physical mixing
+or improved thermal/spatial representations require separately justified
+models and specialist review. No World continuation or timing equivalence
+after compaction is claimed.
