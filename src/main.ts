@@ -17,6 +17,8 @@ app.innerHTML = `
       <button id="pause">Pause</button><button id="step">Step +1</button>
       <label>Ticks / second <select id="speed"><option value="5">5</option><option value="10" selected>10</option><option value="30">30</option><option value="60">60</option></select></label>
       <label>World seed <input id="seed" type="number" value="12345" /></label>
+      <label>Agent policy <select id="agent-policy"><option value="knowledge" selected>Knowledge-limited</option><option value="legacy">Legacy</option></select></label>
+      <label><input id="visibility" type="checkbox" /> Selected agent sight</label>
       <button id="reset" class="secondary">Regenerate</button>
     </div>
   </section><aside class="sidebar">
@@ -45,7 +47,11 @@ const recentEvents = get<HTMLDivElement>('recent-events');
 const historyCount = get<HTMLParagraphElement>('history-count');
 const speed = get<HTMLSelectElement>('speed');
 const seedInput = get<HTMLInputElement>('seed');
-let world: World = createWorld();
+const policySelect = get<HTMLSelectElement>('agent-policy');
+const visibility = get<HTMLInputElement>('visibility');
+const chosenMode = () => policySelect.value === 'legacy' ? 'legacy' as const : 'knowledge' as const;
+let world: World = createWorld(12345, { agentMode: chosenMode() });
+let selectedAgentId: number | null = null;
 let running = true;
 let selected: { x: number; y: number } | null = null;
 let lastTime = performance.now();
@@ -75,16 +81,30 @@ function renderRecentEvents(): void {
 
 function inspect(): void {
   if (!selected) return;
-  const { x, y } = selected;
+  const tracked = world.agents.find(a => a.id === selectedAgentId);
+  const { x, y } = tracked ?? selected;
   const terrain = world.terrain[y * world.width + x];
   const deposits = world.deposits.filter((p) => p.x === x && p.y === y);
   const agents = world.agents.filter((p) => p.x === x && p.y === y);
   const structures = world.structures.filter((p) => p.x === x && p.y === y);
   const lines = [`Tile (${x}, ${y}) · ${terrain}`];
   for (const deposit of deposits) lines.push(`${deposit.material} deposit #${deposit.id}: ${deposit.amount} remaining`);
-  for (const agent of agents) lines.push(`Settler #${agent.id}: energy ${agent.energy.toFixed(0)}, cargo ${agent.cargo.wood} wood / ${agent.cargo.stone} stone${agent.resting ? ' (resting)' : ''}`);
+  for (const agent of agents) lines.push(`${agent.faction} #${agent.id}: energy ${agent.energy.toFixed(0)}, cargo ${agent.cargo.wood} wood / ${agent.cargo.stone} stone${agent.resting ? ' (resting)' : ''}`);
   for (const agent of agents) {
     const skill = agent.skills.gathering;
+    if (world.agentMode === 'knowledge') {
+      const obs = agent.observation;
+      lines.push('  Intention: ' + (agent.decision?.intention ?? 'Awaiting first tick'));
+      lines.push('  Memory: ' + agent.memory.size + ' / ' + agent.memory.capacity);
+      lines.push('  Perception: ' + (obs ? 'tick ' + obs.tick + ' · ' + obs.terrain.length +
+        ' tiles · ' + obs.deposits.length + ' deposits · ' + obs.agents.length +
+        ' other agents · hub ' + (obs.hub ? 'visible' : 'not visible') : 'not yet sampled'));
+      for (const m of agent.memory.query({ kind: 'deposit' })) {
+        if (m.value.kind === 'deposit') lines.push('    ' + m.value.material + ' #' + m.value.id +
+          ' (' + m.value.x + ',' + m.value.y + ') ' + m.value.amount + ' last seen · ' +
+          m.status + ' · tick ' + m.lastObservedTick);
+      }
+    }
     lines.push('  Gathering #' + agent.id + ': ' + (skill.proficiency * 100).toFixed(1) +
       '% · ' + skill.attempts + ' practices · ' + skill.experience + ' XP');
   }
@@ -96,7 +116,8 @@ function inspect(): void {
 function render(): void {
   canvas.width = world.width * TILE;
   canvas.height = world.height * TILE;
-  drawWorld(context!, world);
+  drawWorld(context!, world, visibility.checked ?
+    world.agents.find(a => a.id === selectedAgentId)?.observation : undefined);
   readout.textContent = `Tick ${world.tick.toLocaleString()} · ${world.width} × ${world.height}`;
   mode.textContent = running ? 'RUNNING' : 'PAUSED';
   mode.classList.toggle('paused', !running);
@@ -138,21 +159,27 @@ get<HTMLButtonElement>('step').addEventListener('click', () => {
   stepWorld(world);
   render();
 });
-get<HTMLButtonElement>('reset').addEventListener('click', () => {
+function regenerate(): void {
   const seed = Number(seedInput.value);
   if (!Number.isFinite(seed)) { seedInput.value = '12345'; return; }
-  world = createWorld(Math.trunc(seed));
+  world = createWorld(Math.trunc(seed), { agentMode: chosenMode() });
+  selectedAgentId = null;
   selected = null;
   inspector.textContent = 'Click a tile to inspect its terrain and entities.';
   accumulatedMs = 0;
   render();
-});
+ }
+get<HTMLButtonElement>('reset').addEventListener('click', regenerate);
+policySelect.addEventListener('change', regenerate);
+visibility.addEventListener('change', render);
 canvas.addEventListener('click', (event) => {
   const rect = canvas.getBoundingClientRect();
   const x = Math.floor((event.clientX - rect.left) * canvas.width / rect.width / TILE);
   const y = Math.floor((event.clientY - rect.top) * canvas.height / rect.height / TILE);
   if (x < 0 || y < 0 || x >= world.width || y >= world.height) return;
   selected = { x, y };
+  selectedAgentId = world.agents.filter(a => a.x === x && a.y === y)
+    .sort((a,b) => a.id-b.id)[0]?.id ?? null;
   inspect();
 });
 render();
