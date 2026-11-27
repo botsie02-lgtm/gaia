@@ -1,5 +1,5 @@
 import type { Inventory, Material, Position, Terrain } from '../model.js';
-import type { MemorySnapshot } from '../memory/index.js';
+import { searchBucket, type MemorySnapshot } from '../memory/index.js';
 import type { Observation, ObservedDeposit, ObservedHub } from '../perception/index.js';
 
 export type AgentAction =
@@ -138,6 +138,36 @@ export function decideAgent(observation: Observation, memory: MemorySnapshot,
     // Prefer a less recently visited first step; when disconnected and carrying
     // cargo, rank frontiers toward the remembered hub, not arbitrary frontiers.
     // No visit penalty for normal gathering/return routes above.
+    if (memory.searchPressure && memory.searchPressure.length > 0) {
+      const pressure = (p: Readonly<Position>): number =>
+        memory.searchPressure![searchBucket(p, memory.searchPressure!.length)]!;
+      const knownHome = [...hubs.values()].sort((a,b) => a.id-b.id)[0];
+      const inside = (p: Readonly<Position>): boolean =>
+        p.x >= 0 && p.y >= 0 && p.x < config.width && p.y < config.height;
+      const score = (route: Route): number => {
+        // A missing tile may simply have been forgotten. Approximate regional
+        // observation pressure is a ranking hint, never passability evidence.
+        const edges = neighbors(route.position).filter(p => inside(p) && !terrain.has(key(p)));
+        const edgePressure = Math.min(...edges.map(p => pressure(p)));
+        const recent = penalty(route.first!) + penalty(route.position) * 0.5;
+        const base = route.distance * 0.8 + recent * 0.4;
+        if (carrying > 0 && knownHome) {
+          // Homeward progress matters more than an immediately unvisited step.
+          // Pressure still allows detours around obstructions.
+          return base + 2 * homeDistance(route.position) +
+            0.18 * edgePressure + 0.10 * pressure(route.first!);
+        }
+        const distant = knownHome ? Math.max(0,
+          Math.abs(route.position.x-knownHome.x)+Math.abs(route.position.y-knownHome.y)-16) : 0;
+        return base + edgePressure * 0.8 + pressure(route.first!) * 0.3 + distant * 0.5;
+      };
+      frontiers.sort((a,b) => score(a) - score(b));
+      const frontier = frontiers[0];
+      if (frontier?.first) {
+        return move(carrying ? 'Explore for hub or resources' : 'Explore unknown terrain', frontier.first);
+      }
+      return decision('No reachable known goal or frontier', { kind: 'idle' });
+    }
     frontiers.sort((a,b) => penalty(a.first!) - penalty(b.first!) ||
       homeDistance(a.position) - homeDistance(b.position) ||
       penalty(a.position) - penalty(b.position) || a.distance - b.distance);
