@@ -5,6 +5,11 @@ import type { SkillConfig, SkillRecord } from './skills/index.js';
 import type { AgentMemory } from './memory/index.js';
 import type { Observation } from './perception/index.js';
 import type { AgentMode, Decision } from './agents/index.js';
+import type { GoalState, MotivatedDecision, MotivationConfig } from './agents/motivations/index.js';
+
+/** World policy selection; the existing standalone policy API remains unchanged. */
+export type WorldAgentMode = AgentMode | 'motivated';
+export type MotivationEvaluation = Omit<MotivatedDecision, 'decision' | 'nextState'>;
 
 import type { PhysicalInventory } from './inventory/index.js';
 import type { PhysicalResourceConfig, ResourceMode } from './physical-world.js';
@@ -21,6 +26,10 @@ import type { WorldBiologyConfig, ResolvedAction } from './world-biology.js';
 export interface Agent extends Position {
   /** Independent physiological state; absent when biology is disabled. */
   biology?: BiologicalState;
+  /** Sole retained commitment authority; absent outside motivated mode. */
+  goalState?: GoalState;
+  /** Latest pre-action arbitration evidence, not an additional commitment. */
+  motivation?: MotivationEvaluation;
   /** Last completed tick, not an intention or direct executor call. */
   lastOutcome?: ResolvedAction;
   id: number;
@@ -63,7 +72,8 @@ export interface World {
   readonly resourceMode: ResourceMode;
   readonly physicalConfig: PhysicalResourceConfig | null;
   readonly physicalInventory: PhysicalInventory | null;
-  readonly agentMode: AgentMode;
+  readonly agentMode: WorldAgentMode;
+  readonly motivationConfig?: MotivationConfig;
   readonly perceptionRange: number;
   readonly memoryCapacity: number;
   seed: number;
