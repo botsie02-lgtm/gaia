@@ -44,7 +44,7 @@ export interface MotivationInput {
   readonly biologyConfig?: BiologyConfig;
   readonly previous?: GoalState | null;
 }
-export type Opportunity = 'self' | 'observed' | 'remembered' | 'frontier' | 'unknown' | 'none-known';
+export type Opportunity = 'self' | 'observed' | 'remembered' | 'frontier' | 'unknown' | 'none-known' | 'not-evaluated';
 export type Feasibility = 'requestable' | 'search-only' | 'blocked';
 export interface GoalEvaluation {
   readonly goal: Goal;
@@ -206,9 +206,9 @@ export function decideMotivatedAgent(input: MotivationInput,
     seek('obtain-water', urgency('drink')),
     seek('obtain-food', urgency('feed')),
     evaluate('rest', urgency('rest'), 'self', 'requestable', request('Rest', { kind: 'rest' })),
-    evaluate('gather', c.gatherUrgency, visibleTarget ? 'observed' : rememberedTarget ? 'remembered' : 'none-known',
+    evaluate('gather', c.gatherUrgency, legacyRest ? 'not-evaluated' : visibleTarget ? 'observed' : rememberedTarget ? 'remembered' : 'none-known',
       work ? 'requestable' : 'blocked', work, rememberedTarget ? c.rememberedPenalty : 0, work ? targetId : null),
-    evaluate('explore', c.exploreUrgency, frontier ? 'frontier' : 'none-known',
+    evaluate('explore', c.exploreUrgency, legacyRest ? 'not-evaluated' : frontier ? 'frontier' : 'none-known',
       frontier ? 'requestable' : 'blocked', frontier),
   ]);
   // Stable sort preserves the fixed GOALS order for exact ties.
