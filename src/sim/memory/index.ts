@@ -256,8 +256,9 @@ export class AgentMemory {
     }
     const seen = sightings(observation, this.observerId);
     const next: MemoryEntry[] = [];
-    const oldVisits = new Map(this.#entries.filter(e => e.lastVisitedTick !== undefined)
-      .map(e => [key(e.value), e.lastVisitedTick]));
+    const oldVisits = this.#retention === 'navigation'
+      ? new Map(this.#entries.filter(e => e.lastVisitedTick !== undefined)
+        .map(e => [key(e.value), e.lastVisitedTick])) : undefined;
     for (const old of this.#entries) {
       const fresh = seen.get(key(old.value));
       if (fresh) {
@@ -274,7 +275,7 @@ export class AgentMemory {
     }
     for (const value of seen.values()) {
       const visit = this.#retention === 'navigation' && value.kind === 'terrain'
-        ? (tileKey(value) === tileKey(observation.observer) ? tick : oldVisits.get(key(value))) : undefined;
+        ? (tileKey(value) === tileKey(observation.observer) ? tick : oldVisits?.get(key(value))) : undefined;
       next.push(entry(value, 'current', tick, tick, visit));
     }
     this.#entries = Object.freeze(this.#retention === 'navigation'

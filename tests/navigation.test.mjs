@@ -111,3 +111,22 @@ test('constrained navigation works with physical resources and genuine action ac
   assert.equal(a.agents.reduce((s,x)=>s+x.skills.gathering.attempts,0),a.stats.woodHarvested+a.stats.stoneHarvested);
   assert.ok(a.agents.every(x=>x.memory.size<=32 && x.cargo.wood+x.cargo.stone<=CARGO_LIMIT));
 });
+
+test('original high-range constrained seed no longer exhibits predominant movement reversals', () => {
+  const r=runDiagnostics({seed:12345,ticks:200,agentMode:'knowledge',perceptionRange:6,memoryCapacity:32});
+  assert.ok(r.movement.distance>0);
+  assert.ok(r.movement.backtracks/r.movement.distance<0.1);
+  assert.ok(r.delivered.wood+r.delivered.stone>24);
+  assert.notEqual(r.firstConstructionTick,null);
+});
+
+test('constrained policy cannot see hidden hub or deposit changes', () => {
+  const a=corridor(), b=corridor();
+  a.w.hub.x=23; b.w.hub.x=24;
+  deposit(a.w,23); deposit(b.w,24);
+  b.w.inventory.wood=99;
+  stepWorld(a.w); stepWorld(b.w);
+  assert.deepEqual(a.a.observation,b.a.observation);
+  assert.deepEqual(a.a.memory.snapshot(),b.a.memory.snapshot());
+  assert.deepEqual(a.a.decision,b.a.decision);
+});

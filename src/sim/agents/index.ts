@@ -118,10 +118,16 @@ export function decideAgent(observation: Observation, memory: MemorySnapshot,
   // Explore only reachable known frontier tiles. In constrained memories, a
   // forgotten tile is not necessarily a new place. Recent actual visits are
   // attached to retained terrain; penalize them only during exploration.
-  const frontiers = [...reachable.values()].filter(route => route.first &&
+  const isFrontier = (route: Route): boolean => route.first !== null &&
     neighbors(route.position).some(p => p.x >= 0 && p.y >= 0 &&
-      p.x < config.width && p.y < config.height && !terrain.has(key(p))));
-  if (memory.retention === 'navigation') {
+      p.x < config.width && p.y < config.height && !terrain.has(key(p)));
+  if (memory.retention !== 'navigation') {
+    // Preserve the original early-exit behaviour for larger memories.
+    for (const route of reachable.values()) if (isFrontier(route)) {
+      return move(carrying ? 'Explore for hub or resources' : 'Explore unknown terrain', route.first!);
+    }
+  } else {
+    const frontiers = [...reachable.values()].filter(isFrontier);
     const visits = new Map(memory.entries.filter(e => e.lastVisitedTick !== undefined)
       .map(e => [key(e.value), e.lastVisitedTick!]));
     const penalty = (p: Readonly<Position>): number =>
@@ -135,10 +141,10 @@ export function decideAgent(observation: Observation, memory: MemorySnapshot,
     frontiers.sort((a,b) => penalty(a.first!) - penalty(b.first!) ||
       homeDistance(a.position) - homeDistance(b.position) ||
       penalty(a.position) - penalty(b.position) || a.distance - b.distance);
-  }
-  const frontier = frontiers[0];
-  if (frontier?.first) {
-    return move(carrying ? 'Explore for hub or resources' : 'Explore unknown terrain', frontier.first);
+    const frontier = frontiers[0];
+    if (frontier?.first) {
+      return move(carrying ? 'Explore for hub or resources' : 'Explore unknown terrain', frontier.first);
+    }
   }
   return decision('No reachable known goal or frontier', { kind: 'idle' });
 }
