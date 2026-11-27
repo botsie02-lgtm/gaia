@@ -1,7 +1,7 @@
 import './style.css';
 import { createWorld, stepWorld } from './sim/world.js';
 import { drawWorld, TILE } from './ui/draw.js';
-import type { World } from './sim/model.js';
+import type { World, WorldAgentMode } from './sim/model.js';
 import { rankMotivations } from './sim/biology/index.js';
 import { resourceOwnerId } from './sim/resource-actions/index.js';
 import type { OwnerKind } from './sim/resource-actions/index.js';
@@ -20,7 +20,7 @@ app.innerHTML = `
       <button id="pause">Pause</button><button id="step">Step +1</button>
       <label>Ticks / second <select id="speed"><option value="5">5</option><option value="10" selected>10</option><option value="30">30</option><option value="60">60</option></select></label>
       <label>World seed <input id="seed" type="number" value="12345" /></label>
-      <label>Agent policy <select id="agent-policy"><option value="knowledge" selected>Knowledge-limited</option><option value="legacy">Legacy</option></select></label>
+      <label>Agent policy <select id="agent-policy"><option value="knowledge" selected>Knowledge-limited</option><option value="motivated">Motivated (requires biology)</option><option value="legacy">Legacy</option></select></label>
       <label>Resources <select id="resource-mode"><option value="physical" selected>Physical matter</option><option value="legacy">Legacy units</option></select></label>
       <label><input id="thermal" type="checkbox" /> Thermal contacts (physical)</label>
       <label>Biology <select id="biology"><option value="off" selected>Disabled</option><option value="on">Needs (no food / water)</option></select></label>
@@ -63,7 +63,8 @@ const chosenThermal = () => chosenResourceMode() === 'physical' && thermalSelect
 const biologySelect = get<HTMLSelectElement>('biology');
 const durationSelect = get<HTMLSelectElement>('tick-duration');
 const chosenBiology = () => biologySelect.value === 'on';
-const chosenMode = () => policySelect.value === 'legacy' ? 'legacy' as const : 'knowledge' as const;
+const chosenMode = (): WorldAgentMode => policySelect.value === 'legacy' ? 'legacy' :
+  policySelect.value === 'motivated' ? 'motivated' : 'knowledge';
 let world: World = createWorld(12345, { agentMode: chosenMode(), resourceMode: chosenResourceMode(), thermal: chosenThermal(), biology: chosenBiology(), tickDurationSeconds: Number(durationSelect.value) });
 let selectedAgentId: number | null = null;
 let running = true;
@@ -126,11 +127,26 @@ function inspect(): void {
       const percent = (n: number) => (n * 100).toFixed(2) + '%';
       lines.push('  Hunger ' + percent(b.hunger) + ' · Thirst ' + percent(b.thirst),
         '  Fatigue ' + percent(b.fatigue) + ' · Condition ' + percent(b.condition),
-        '  Motivation ranking (not decisions): ' + rankMotivations(b, world.biology.config)
+        '  Current biological urgency (post-action): ' + rankMotivations(b, world.biology.config)
           .map(m => m.kind + ' ' + percent(m.urgency)).join(' > '),
         '  No feeding/drinking available; condition zero is not death.');
     }
-    if (world.agentMode === 'knowledge') {
+    if (agent.motivation && agent.goalState) {
+      const m = agent.motivation;
+      lines.push('  Arbitration at tick ' + agent.goalState.lastTick + ' (pre-action)',
+        '  Desired: ' + m.desiredGoal + ' · Selected: ' + (m.selectedGoal ?? 'none'),
+        '  Reason: ' + m.reason + ' · Committed since: ' + agent.goalState.sinceTick);
+      for (const e of m.evaluations) {
+        lines.push('    ' + e.goal + ': urgency ' + e.urgency.toFixed(3) +
+          ' · ' + e.feasibility + ' · evidence ' + e.opportunity +
+          ' · cost ' + (e.estimatedActionCost?.toFixed(3) ?? '—') +
+          ' · uncertainty ' + e.uncertaintyPenalty.toFixed(3) +
+          ' · score ' + (e.score?.toFixed(3) ?? '—') +
+          ' · target ' + (e.targetId ?? 'none') +
+          (e.decision ? ' · ' + e.decision.intention : ''));
+      }
+    }
+    if (world.agentMode !== 'legacy') {
       const obs = agent.observation;
       lines.push('  Intention: ' + (agent.decision?.intention ?? 'Awaiting first tick'));
       lines.push('  Memory: ' + agent.memory.size + ' / ' + agent.memory.capacity);
@@ -172,8 +188,11 @@ function render(): void {
     'Physical hearth retains fuel; combustion and abstract heat are disabled.' :
     'Once built, the hearth burns wood to generate and lose abstract heat over time.';
   get<HTMLParagraphElement>('biology-rule').textContent = world.biology ?
-    'Incomplete deprivation scenario: no food or water consumption, no death or motivation-driven actions. Abstract energy still controls rest.' : '';
+    (world.agentMode === 'motivated' ?
+      'Incomplete deprivation scenario: motivated search cannot discover food or water yet. Voluntary rest is enabled; mandatory abstract-energy recovery takes priority. No consumption or death.' :
+      'Incomplete deprivation scenario: no food or water consumption, death or motivation-driven actions. Abstract energy controls rest.') : '';
   stats.innerHTML = [
+    ['Agent policy', world.agentMode],
     ['Biological needs', world.biology ? 'Enabled (deprivation)' : 'Disabled'],
     ['Modeled seconds / tick', world.tickDurationSeconds],
     ['Modeled elapsed seconds', world.tick * world.tickDurationSeconds],
@@ -220,6 +239,9 @@ get<HTMLButtonElement>('step').addEventListener('click', () => {
   render();
 });
 function regenerate(): void {
+  // The UI makes the required dependency visible rather than silently falling back.
+  if (chosenMode() === 'motivated') biologySelect.value = 'on';
+  biologySelect.disabled = chosenMode() === 'motivated';
   const seed = Number(seedInput.value);
   if (!Number.isFinite(seed)) { seedInput.value = '12345'; return; }
   world = createWorld(Math.trunc(seed), { agentMode: chosenMode(), resourceMode: chosenResourceMode(), thermal: chosenThermal(), biology: chosenBiology(), tickDurationSeconds: Number(durationSelect.value) });

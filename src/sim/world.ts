@@ -7,7 +7,10 @@ import type { SkillConfig } from './skills/index.js';
 import { AgentMemory, DEFAULT_MEMORY_CAPACITY, NAVIGATION_MEMORY_MAX_CAPACITY } from './memory/index.js';
 import { observeAgent, DEFAULT_PERCEPTION_RANGE } from './perception/index.js';
 import { decideAgent } from './agents/index.js';
-import type { AgentMode, AgentAction } from './agents/index.js';
+import type { AgentAction } from './agents/index.js';
+import type { WorldAgentMode } from './model.js';
+import { createMotivationConfig, decideMotivatedAgent, restoreGoalState } from './agents/motivations/index.js';
+import type { MotivationConfig } from './agents/motivations/index.js';
 import type { Inventory } from './model.js';
 import type { ResourceMode } from './physical-world.js';
 import { physicalConfig, initializePhysicalWorld, movePhysical, physicalDetails, bindHearth } from './physical-world.js';
@@ -47,7 +50,9 @@ export interface WorldOptions {
   readonly resourceMode?: ResourceMode;
   readonly kgPerUnit?: Readonly<Inventory>;
   readonly initialTemperatureC?: Readonly<Inventory>;
-  readonly agentMode?: AgentMode;
+  readonly agentMode?: WorldAgentMode;
+  /** Optional arbitration overrides, only valid with motivated policy. */
+  readonly motivations?: Partial<MotivationConfig>;
   readonly perceptionRange?: number;
   readonly memoryCapacity?: number;
   readonly eventCapacity?: number;
@@ -73,7 +78,7 @@ export function createWorld(seed = 12345, options: WorldOptions = {}): World {
   const agentMode = options.agentMode ?? 'legacy';
   const perceptionRange = options.perceptionRange ?? DEFAULT_PERCEPTION_RANGE;
   const memoryCapacity = options.memoryCapacity ?? DEFAULT_MEMORY_CAPACITY;
-  if (agentMode !== 'legacy' && agentMode !== 'knowledge') throw new RangeError('Unknown agent mode');
+  if (agentMode !== 'legacy' && agentMode !== 'knowledge' && agentMode !== 'motivated') throw new RangeError('Unknown agent mode');
   if (!Number.isSafeInteger(perceptionRange) || perceptionRange < 0 ||
       !Number.isSafeInteger(memoryCapacity) || memoryCapacity < 1) throw new RangeError('Invalid knowledge configuration');
   const resourceMode = options.resourceMode ?? 'legacy';
@@ -90,6 +95,10 @@ export function createWorld(seed = 12345, options: WorldOptions = {}): World {
   if (thermal && resourceMode !== 'physical') throw new RangeError('Thermal mode requires physical resources');
   const biology = options.biology === undefined || options.biology === false ? undefined :
     createWorldBiology(options.biology === true ? {} : options.biology);
+  if (agentMode === 'motivated' && !biology) throw new RangeError('Motivated mode requires biology');
+  if (agentMode !== 'motivated' && options.motivations !== undefined)
+    throw new RangeError('Motivation configuration requires motivated mode');
+  const motivationConfig = agentMode === 'motivated' ? createMotivationConfig(options.motivations) : undefined;
   const width = WIDTH;
   const height = HEIGHT;
   const hub = { x: Math.floor(width / 2), y: Math.floor(height / 2) };
@@ -99,6 +108,7 @@ export function createWorld(seed = 12345, options: WorldOptions = {}): World {
     tickDurationSeconds,
     ...(thermal ? { thermal } : {}),
     ...(biology ? { biology } : {}),
+    ...(motivationConfig ? { motivationConfig } : {}),
     seed,
     randomState: initialRandomState(seed),
     tick: 0,
@@ -133,7 +143,7 @@ export function createWorld(seed = 12345, options: WorldOptions = {}): World {
     const agent: Agent = {
       id: world.nextEntityId++,
       memory: new AgentMemory(world.nextEntityId - 1, memoryCapacity,
-         agentMode === 'knowledge' && memoryCapacity <= NAVIGATION_MEMORY_MAX_CAPACITY ? 'navigation' : 'recency'),
+         agentMode !== 'legacy' && memoryCapacity <= NAVIGATION_MEMORY_MAX_CAPACITY ? 'navigation' : 'recency'),
       kind: 'agent',
       faction: 'settler',
       x: hub.x + (i % 5) - 2,
@@ -143,6 +153,9 @@ export function createWorld(seed = 12345, options: WorldOptions = {}): World {
       cargo: { wood: 0, stone: 0 },
       skills: { gathering: createSkillRecord(gatheringSkillConfig) },
       ...(biology ? { biology: createBiologicalState(biology.initial) } : {}),
+      ...(motivationConfig ? { goalState: restoreGoalState({
+        version: 1, observerId: world.nextEntityId - 1, lastTick: 0, goal: null, sinceTick: 0,
+      }) } : {}),
     };
     world.agents.push(agent);
   }
@@ -152,6 +165,8 @@ export function createWorld(seed = 12345, options: WorldOptions = {}): World {
     configurable: false, writable: false });
   if (biology) Object.defineProperty(world, 'biology', { value: biology, enumerable: true,
     configurable: false, writable: false });
+  if (motivationConfig) Object.defineProperty(world, 'motivationConfig', { value: motivationConfig,
+    enumerable: true, configurable: false, writable: false });
   if (resourceMode === 'physical') initializePhysicalWorld(world);
   return world;
 }
@@ -349,7 +364,7 @@ export function executeAgentAction(world: World, agent: Agent, action: AgentActi
       (!world.agents.includes(agent) || !validPhysicalPosition(world, agent)))
     return resolved(world, agent, action.kind, 'rejected', 'invalid-agent');
   if (restIfNeeded(agent)) return resolved(world, agent, action.kind, 'rest',
-    action.kind === 'rest' ? undefined : 'mandatory-rest');
+    world.agentMode === 'motivated' || action.kind !== 'rest' ? 'mandatory-rest' : undefined);
   switch (action.kind) {
     case 'move': return moveAgent(world, agent, action.to);
     case 'harvest': {
@@ -361,7 +376,12 @@ export function executeAgentAction(world: World, agent: Agent, action: AgentActi
       return action.targetId === world.hub.id ? deliverCargo(world, agent) :
         resolved(world, agent, 'deliver', 'rejected', 'wrong-hub');
     case 'rest':
-      // Preserve legacy rest gating: a request alone is not confirmed rest.
+      // Motivated rest is a real one-tick action, not a new mandatory latch.
+      // Preserve the legacy recovery increment/cap and leave hunger/thirst to biology.
+      if (world.agentMode === 'motivated' && world.biology && agent.biology) {
+        agent.energy = Math.min(100, agent.energy + 5);
+        return resolved(world, agent, 'rest', 'rest', 'voluntary-rest');
+      }
       return resolved(world, agent, 'rest', 'rejected', 'rest-not-required');
     case 'idle': return resolved(world, agent, 'idle');
   }
@@ -374,9 +394,22 @@ function knowledgeTick(world: World): void {
     const observation = observeAgent(world, agent.id, { range: world.perceptionRange });
     const memory = agent.memory.update(observation);
     agent.observation = observation;
-    agent.decision = decideAgent(observation, memory,
-      Object.freeze({ energy: agent.energy, resting: agent.resting, cargo: Object.freeze({ ...agent.cargo }) }),
-      Object.freeze({ width: world.width, height: world.height, cargoLimit: CARGO_LIMIT }));
+    const own = Object.freeze({ energy: agent.energy, resting: agent.resting, cargo: Object.freeze({ ...agent.cargo }) });
+    const policy = Object.freeze({ width: world.width, height: world.height, cargoLimit: CARGO_LIMIT });
+    if (world.agentMode === 'motivated') {
+      if (!world.biology || !world.motivationConfig || !agent.biology || !agent.goalState)
+        throw new Error('Motivated agent missing initialized individual state');
+      const result = decideMotivatedAgent({
+        observation, memory, own, policy, biology: agent.biology,
+        biologyConfig: world.biology.config, previous: agent.goalState,
+      }, world.motivationConfig);
+      agent.decision = result.decision;
+      agent.goalState = result.nextState;
+      agent.motivation = Object.freeze({ desiredGoal: result.desiredGoal, selectedGoal: result.selectedGoal,
+        reason: result.reason, evaluations: result.evaluations });
+    } else {
+      agent.decision = decideAgent(observation, memory, own, policy);
+    }
   }
   for (const agent of agents) {
     const outcome = agent.decision ? executeAgentAction(world, agent, agent.decision.action) :
@@ -430,7 +463,7 @@ function processHearth(world: World, hearth: Hearth): void {
 /** Fixed-step, deterministic simulation. No Date.now/Math.random/DOM access. */
 export function stepWorld(world: World): void {
   world.tick++;
-  if (world.agentMode === 'knowledge') knowledgeTick(world);
+  if (world.agentMode !== 'legacy') knowledgeTick(world);
   else for (const agent of world.resourceMode === 'physical' ?
     [...world.agents].sort((a,b) => a.id-b.id) : world.agents)
     completeAgentTick(world, agent, act(world, agent));
