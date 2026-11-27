@@ -8,6 +8,11 @@ import { AgentMemory, DEFAULT_MEMORY_CAPACITY } from './memory/index.js';
 import { observeAgent, DEFAULT_PERCEPTION_RANGE } from './perception/index.js';
 import { decideAgent } from './agents/index.js';
 import type { AgentMode, AgentAction } from './agents/index.js';
+import type { Inventory } from './model.js';
+import type { ResourceMode } from './physical-world.js';
+import { physicalConfig, initializePhysicalWorld, movePhysical, physicalDetails, bindHearth } from './physical-world.js';
+import { resourceOwnerId } from './resource-actions/index.js';
+import type { ResourceTransferReceipt } from './resource-actions/index.js';
 
 export const WIDTH = 52;
 export const HEIGHT = 34;
@@ -25,6 +30,9 @@ export const GATHERING_SKILL: SkillConfig = Object.freeze({
 });
 
 export interface WorldOptions {
+  readonly resourceMode?: ResourceMode;
+  readonly kgPerUnit?: Readonly<Inventory>;
+  readonly initialTemperatureC?: Readonly<Inventory>;
   readonly agentMode?: AgentMode;
   readonly perceptionRange?: number;
   readonly memoryCapacity?: number;
@@ -54,11 +62,15 @@ export function createWorld(seed = 12345, options: WorldOptions = {}): World {
   if (agentMode !== 'legacy' && agentMode !== 'knowledge') throw new RangeError('Unknown agent mode');
   if (!Number.isSafeInteger(perceptionRange) || perceptionRange < 0 ||
       !Number.isSafeInteger(memoryCapacity) || memoryCapacity < 1) throw new RangeError('Invalid knowledge configuration');
+  const resourceMode = options.resourceMode ?? 'legacy';
+  if (resourceMode !== 'legacy' && resourceMode !== 'physical') throw new RangeError('Unknown resource mode');
+  const config = resourceMode === 'physical' ? physicalConfig(options.kgPerUnit, options.initialTemperatureC) : null;
   const width = WIDTH;
   const height = HEIGHT;
   const hub = { x: Math.floor(width / 2), y: Math.floor(height / 2) };
   const world: World = {
     agentMode, perceptionRange, memoryCapacity,
+    resourceMode, physicalConfig: config, physicalInventory: null,
     seed,
     randomState: initialRandomState(seed),
     tick: 0,
@@ -106,6 +118,7 @@ export function createWorld(seed = 12345, options: WorldOptions = {}): World {
   }
   // Allocate after agents so their existing IDs/parity (and decisions) stay unchanged.
   world.hub.id = world.nextEntityId++;
+  if (resourceMode === 'physical') initializePhysicalWorld(world);
   return world;
 }
 
@@ -219,34 +232,54 @@ function restIfNeeded(agent: Agent): boolean {
 
 function deliverCargo(world: World, agent: Agent): void {
   if (agent.x !== world.hub.x || agent.y !== world.hub.y || cargoCount(agent) <= 0) return;
-    const delivered = agent.cargo;
-    world.inventory.wood += delivered.wood;
-    world.inventory.stone += delivered.stone;
-    agent.cargo = { wood: 0, stone: 0 };
+    const delivered = { ...agent.cargo };
+    let receipt: ResourceTransferReceipt | undefined;
+    if (world.resourceMode === 'physical') {
+      if (!world.agents.includes(agent) || !validPhysicalPosition(world, agent)) return;
+      receipt = movePhysical(world, resourceOwnerId('agent', agent.id), resourceOwnerId('hub', world.hub.id), delivered);
+      if (!receipt) return;
+    } else {
+      world.inventory.wood += delivered.wood;
+      world.inventory.stone += delivered.stone;
+      agent.cargo = { wood: 0, stone: 0 };
+    }
     world.history.append({
       tick: world.tick, kind: 'stockpile.delivered', actorId: agent.id, targetId: world.hub.id,
-      details: { wood: delivered.wood, stone: delivered.stone, unit: 'prototype-unit' },
+      details: { wood: delivered.wood, stone: delivered.stone, unit: 'prototype-unit', ...physicalDetails(receipt) },
     });
     return;
+}
+
+function validPhysicalPosition(world: World, position: Position): boolean {
+  return Number.isSafeInteger(position.x) && Number.isSafeInteger(position.y) && passable(world, position.x, position.y);
 }
 
 function harvest(world: World, agent: Agent, deposit: Deposit): void {
   if (deposit.x !== agent.x || deposit.y !== agent.y || deposit.amount < 1 ||
       cargoCount(agent) >= CARGO_LIMIT) return;
   const material = deposit.material;
-    deposit.amount -= 1;
-    agent.cargo[material] += 1;
+    let receipt: ResourceTransferReceipt | undefined;
+    if (world.resourceMode === 'physical') {
+      if (!world.agents.includes(agent) || !world.deposits.includes(deposit) ||
+          !validPhysicalPosition(world, agent) || cargoCount(agent) + 1 > CARGO_LIMIT) return;
+      receipt = movePhysical(world, resourceOwnerId('deposit', deposit.id), resourceOwnerId('agent', agent.id),
+        { wood: material === 'wood' ? 1 : 0, stone: material === 'stone' ? 1 : 0 });
+      if (!receipt) return;
+    } else {
+      deposit.amount -= 1;
+      agent.cargo[material] += 1;
+    }
     agent.energy = Math.max(0, agent.energy - 1);
     if (material === 'wood') world.stats.woodHarvested++;
     else world.stats.stoneHarvested++;
     world.history.append({
       tick: world.tick, kind: 'resource.harvested', actorId: agent.id, targetId: deposit.id,
-      details: { material, amount: 1, remaining: deposit.amount, unit: 'prototype-unit' },
+      details: { material, amount: 1, remaining: deposit.amount, unit: 'prototype-unit', ...physicalDetails(receipt) },
     });
     if (deposit.amount === 0) {
       world.history.append({
         tick: world.tick, kind: 'resource.depleted', actorId: agent.id, targetId: deposit.id,
-        details: { material, remaining: 0, unit: 'prototype-unit' },
+        details: { material, remaining: 0, unit: 'prototype-unit', ...physicalDetails(receipt) },
       });
     }
     const config = world.gatheringSkillConfig;
@@ -265,6 +298,7 @@ function harvest(world: World, agent: Agent, deposit: Deposit): void {
 
 /** Resolve only the requested local action; never substitute a hidden goal. */
 export function executeAgentAction(world: World, agent: Agent, action: AgentAction): void {
+  if (world.resourceMode === 'physical' && (!world.agents.includes(agent) || !validPhysicalPosition(world, agent))) return;
   if (restIfNeeded(agent)) return;
   switch (action.kind) {
     case 'move': {
@@ -304,6 +338,7 @@ function knowledgeTick(world: World): void {
 }
 
 function act(world: World, agent: Agent): void {
+  if (world.resourceMode === 'physical' && !validPhysicalPosition(world, agent)) return;
   if (restIfNeeded(agent)) return;
 
   const carrying = cargoCount(agent);
@@ -326,6 +361,8 @@ function act(world: World, agent: Agent): void {
 }
 
 function processHearth(world: World, hearth: Hearth): void {
+  // Until balanced combustion exists, physical fuel and temperatures remain intact.
+  if (world.resourceMode === 'physical') return;
   // 1 fuel unit burns per 30 ticks; heat rises on combustion and cools every tick.
   if (world.tick % 30 === 0 && hearth.fuel > 0) {
     hearth.fuel--;
@@ -351,27 +388,42 @@ function processHearth(world: World, hearth: Hearth): void {
 export function stepWorld(world: World): void {
   world.tick++;
   if (world.agentMode === 'knowledge') knowledgeTick(world);
-  else for (const agent of world.agents) act(world, agent);
+  else for (const agent of world.resourceMode === 'physical' ?
+    [...world.agents].sort((a,b) => a.id-b.id) : world.agents) act(world, agent);
 
   if (world.structures.length === 0 &&
       world.inventory.wood >= HEARTH_COST.wood &&
       world.inventory.stone >= HEARTH_COST.stone) {
-    world.inventory.wood -= HEARTH_COST.wood;
-    world.inventory.stone -= HEARTH_COST.stone;
     const hearth: Hearth = {
-      id: world.nextEntityId++, kind: 'structure', structure: 'hearth',
+      id: world.nextEntityId, kind: 'structure', structure: 'hearth',
       x: world.hub.x + 2, y: world.hub.y,
       stoneUsed: HEARTH_COST.stone,
       fuel: HEARTH_COST.wood,
       heat: 0,
     };
-    world.structures.push(hearth);
-    world.stats.hearthsBuilt++;
-    world.history.append({
-      tick: world.tick, kind: 'structure.built', targetId: hearth.id,
-      details: { structure: hearth.structure, stockpileId: world.hub.id,
-        wood: HEARTH_COST.wood, stone: HEARTH_COST.stone, unit: 'prototype-unit' },
-    });
+    let receipt: ResourceTransferReceipt | undefined;
+    if (world.resourceMode === 'physical') {
+      if (validPhysicalPosition(world, hearth) && validPhysicalPosition(world, world.hub) &&
+          Number.isSafeInteger(hearth.id + 1) && hearth.id > 0 &&
+          !world.deposits.some(d => d.x === hearth.x && d.y === hearth.y)) {
+        receipt = movePhysical(world, resourceOwnerId('hub', world.hub.id),
+          resourceOwnerId('structure', hearth.id), HEARTH_COST, true);
+        if (receipt) bindHearth(world, hearth);
+      }
+    } else {
+      world.inventory.wood -= HEARTH_COST.wood;
+      world.inventory.stone -= HEARTH_COST.stone;
+    }
+    if (world.resourceMode === 'legacy' || receipt) {
+      world.nextEntityId++;
+      world.structures.push(hearth);
+      world.stats.hearthsBuilt++;
+      world.history.append({
+        tick: world.tick, kind: 'structure.built', targetId: hearth.id,
+        details: { structure: hearth.structure, stockpileId: world.hub.id,
+          wood: HEARTH_COST.wood, stone: HEARTH_COST.stone, unit: 'prototype-unit', ...physicalDetails(receipt) },
+      });
+    }
   }
   for (const hearth of world.structures) processHearth(world, hearth);
   // Remove depleted deposits to avoid accumulating inactive objects.
@@ -380,5 +432,5 @@ export function stepWorld(world: World): void {
 
 export function snapshot(world: World): string {
   // For reproducibility and deterministic regression tests.
-  return JSON.stringify(world);
+  return JSON.stringify({ ...world, physicalInventory: world.physicalInventory?.snapshot() ?? null });
 }
