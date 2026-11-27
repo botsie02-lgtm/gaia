@@ -90,9 +90,35 @@ function resolvedMass(actual: number, requested: number): void {
  */
 export class PhysicalInventory {
   #samples = new Map<SampleId, PersistentSample>();
+  // Derived membership only: the registry remains the sole physical authority.
+  #ownerSamples = new Map<OwnerId, Set<SampleId>>();
   #nextSampleId = 1;
   #revision = 0;
   private constructor() {}
+
+  /** Publish validated final records only, after the entire transaction stages.
+   * Membership is changed only when an ID enters, leaves or changes owner. */
+  #publish(id: SampleId, sample: PersistentSample | null): void {
+    const previous = this.#samples.get(id);
+    if (previous && previous.ownerId !== sample?.ownerId) {
+      const ids = this.#ownerSamples.get(previous.ownerId)!;
+      ids.delete(id);
+      if (ids.size === 0) this.#ownerSamples.delete(previous.ownerId);
+    }
+    if (sample) {
+      if (previous?.ownerId !== sample.ownerId) {
+        let ids = this.#ownerSamples.get(sample.ownerId);
+        if (!ids) {
+          ids = new Set<SampleId>();
+          this.#ownerSamples.set(sample.ownerId, ids);
+        }
+        ids.add(id);
+      }
+      this.#samples.set(id, sample);
+    } else {
+      this.#samples.delete(id);
+    }
+  }
 
   static initialize(samples: readonly OwnedMaterial[] = []): PhysicalInventory {
     if (!Array.isArray(samples)) throw new TypeError('Expected initial samples');
@@ -100,7 +126,7 @@ export class PhysicalInventory {
     for (const sample of samples) {
       const id = store.#nextSampleId;
       integer(id + 1, 1);
-      store.#samples.set(id, record(sample, id));
+      store.#publish(id, record(sample, id));
       store.#nextSampleId++;
     }
     return store;
@@ -130,7 +156,7 @@ export class PhysicalInventory {
       if (copy.sampleId >= snapshot.nextSampleId || store.#samples.has(copy.sampleId)) {
         throw new RangeError('Duplicate or unallocated sample ID');
       }
-      store.#samples.set(copy.sampleId, copy);
+      store.#publish(copy.sampleId, copy);
     }
     store.#revision = snapshot.revision;
     store.#nextSampleId = snapshot.nextSampleId;
@@ -138,14 +164,17 @@ export class PhysicalInventory {
   }
 
   get revision(): number { return this.#revision; }
+  /** Read-only allocation cursor for revision-checked transaction planning. */
+  get nextSampleId(): SampleId { return this.#nextSampleId; }
   get(sampleId: SampleId): PersistentSample | undefined {
     integer(sampleId, 1);
     return this.#samples.get(sampleId);
   }
   forOwner(ownerId: OwnerId): readonly PersistentSample[] {
     owner(ownerId);
-    return Object.freeze([...this.#samples.values()].filter(s => s.ownerId === ownerId)
-      .sort((a, b) => a.sampleId - b.sampleId));
+    const ids = this.#ownerSamples.get(ownerId);
+    return Object.freeze(ids ? [...ids].sort((a, b) => a - b)
+      .map(id => this.#samples.get(id)!) : []);
   }
   snapshot(): InventorySnapshot {
     return Object.freeze({
@@ -250,8 +279,7 @@ export class PhysicalInventory {
     });
     if (this.#revision !== expectedRevision) throw new RangeError('Stale inventory revision');
     for (const [id, sample] of staged) {
-      if (sample === null) this.#samples.delete(id);
-      else this.#samples.set(id, sample);
+      this.#publish(id, sample);
     }
     this.#nextSampleId = nextId;
     this.#revision = receipt.revision;

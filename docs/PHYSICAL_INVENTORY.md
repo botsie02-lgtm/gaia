@@ -97,11 +97,16 @@ transfer can differ from the actual representable temperature changes at
 extreme scales. The existing fixed-phase model does not infer phase changes,
 pressure, chemistry or real contact geometry; see THERMAL.md and MATERIALS.md.
 
-Storage is O(live samples); a transaction uses O(touched IDs + operations)
-temporary space and expected O(operations) map work. No global copy or scan
-per transaction. get is expected O(1); owner views currently scan O(N) and
-sort matching records; snapshots sort O(N log N). Add an owner index only
-after profiling. Keep sample granularity coarse, and do not split every
+Storage is O(live samples + nonempty owners), including a derived owner-to-ID
+index with one membership per sample. Initialization and restoration rebuild it
+from authoritative records; empty owner buckets are deleted. Transactions stage
+only touched records, then publish final records and membership together after
+all validation. Failed operations do not alter membership, revision or cursor.
+For N live samples and k held by the requested owner, get and nextSampleId are
+expected O(1), owner views are O(k log k) time and O(k) temporary space;
+snapshots still sort O(N log N). Transactions use O(touched IDs + operations)
+temporary space and expected O(operations) map/set work. See
+INVENTORY_PERFORMANCE.md for measurements and limitations. Keep sample granularity coarse, and do not split every
 particle or retain a snapshot per tick. No external persistence or crash
 recovery is implemented.
 

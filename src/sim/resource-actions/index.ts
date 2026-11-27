@@ -148,7 +148,7 @@ export function transferResources(
   }
   const ordered = [...quantities].sort((a, b) => compare(a.materialId, b.materialId));
   const available = inventory.forOwner(fromOwnerId); // already in ascending sample ID order
-  let nextId = inventory.snapshot().nextSampleId;
+  let nextId = inventory.nextSampleId;
   const operations: InventoryOperation[] = [];
   const materials: MaterialMovement[] = [];
   for (const quantity of ordered) {

@@ -108,10 +108,11 @@ the existing inventory snapshot; restore with PhysicalInventory.restore,
 never by repeating migration. Receipts do not need to be persisted for ID
 allocation or deterministic continuation.
 
-Owner queries currently scan all live samples; obtaining the allocation
-cursor uses the inventory snapshot (O(N log N) time, O(N) space). Planning
-scans source samples once per requested material; the catalog is small.
-No index, persistence backend or runtime benchmark is introduced.
+Owner queries use the inventory's derived owner index. Transfer planning reads
+the read-only nextSampleId cursor directly (O(1)) rather than serializing a
+complete inventory snapshot. Planning scans source samples once per requested
+material in numeric ID order. Owner-registry validation and calibration
+conversion remain per-call work. See INVENTORY_PERFORMANCE.md for measurements.
 
 ## Incremental World migration (future integration PR)
 
