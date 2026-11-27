@@ -24,6 +24,8 @@ export interface MemorySnapshot {
   readonly capacity: number;
   readonly lastObservationTick: number | null;
   readonly entries: readonly MemoryEntry[];
+  /** Bounded approximate regional observation pressure, not a terrain map. */
+  readonly searchPressure?: readonly number[];
 }
 
 export interface MemoryQuery {
@@ -128,6 +130,32 @@ function compare(a: MemoryEntry, b: MemoryEntry): number {
 const manhattan = (a: { x: number; y: number }, b: { x: number; y: number }): number =>
   Math.abs(a.x - b.x) + Math.abs(a.y - b.y);
 
+/** Coarse four-tile regions share fixed buckets; collisions only affect search ranking. */
+export function searchBucket(p: { readonly x: number; readonly y: number }, length: number): number {
+  const x = Math.floor(p.x / 4), y = Math.floor(p.y / 4);
+  return ((Math.imul(x, 73856093) ^ Math.imul(y, 19349663)) >>> 0) % length;
+}
+function searchEnabled(observation: Observation, capacity: number): boolean {
+  return capacity >= 16 && observation.range > 0 && observation.range <= 2;
+}
+function updatePressure(previous: readonly number[] | undefined, observation: Observation,
+  capacity: number, lastTick: number | null, entries: readonly MemoryEntry[]): readonly number[] {
+  const length = Math.min(capacity, 64);
+  const epochs = lastTick === null ? 0 : Math.min(8,
+    Math.floor(observation.tick / 256) - Math.floor(lastTick / 256));
+  const pressure = Array.from({ length }, (_, i) => (previous?.[i] ?? 0) >> epochs);
+  const previousPosition = entries.find(e => e.value.kind === 'terrain' &&
+    e.lastVisitedTick !== undefined && e.lastVisitedTick === lastTick);
+  // Count actual observed positions, not repeated stationary ticks or requested moves.
+  if (!previousPosition || tileKey(previousPosition.value) !== tileKey(observation.observer)) {
+    const regions = new Set(observation.terrain.map(t => searchBucket(t, length)));
+    for (const index of regions) pressure[index] = Math.min(255, pressure[index]! + 1);
+    const own = searchBucket(observation.observer, length);
+    pressure[own] = Math.min(255, pressure[own]! + 2);
+  }
+  return Object.freeze(pressure);
+}
+
 /** Select within the original entry budget. No coordinates beyond candidate evidence.
  * Keep the hub and a connected corridor from it toward the observer, then reserve
  * space for useful deposits, recent visits and local terrain. */
@@ -138,6 +166,22 @@ function retainNavigation(entries: MemoryEntry[], observation: Observation, capa
     if (e && chosen.size < capacity) chosen.add(e);
   };
   const terrain = new Map(entries.filter(e => e.value.kind === 'terrain').map(e => [tileKey(e.value), e]));
+  const recovery = searchEnabled(observation, capacity);
+  // Local connectivity is based only on currently available terrain evidence.
+  const local = new Set<string>();
+  if (recovery) {
+    const queue = [origin as { x: number; y: number }];
+    local.add(tileKey(origin));
+    for (let i = 0; i < queue.length; i++) {
+      const p = queue[i]!;
+      for (const n of [{ x:p.x+1,y:p.y },{ x:p.x,y:p.y+1 },
+        { x:p.x-1,y:p.y },{ x:p.x,y:p.y-1 }]) {
+        const k = tileKey(n), v = terrain.get(k)?.value;
+        if (local.has(k) || v?.kind !== 'terrain' || v.terrain === 'water') continue;
+        local.add(k); queue.push(n);
+      }
+    }
+  }
   const hub = entries.filter(e => e.value.kind === 'hub' && e.status !== 'absent')
     .sort(compare)[0];
   add(hub);
@@ -166,14 +210,17 @@ function retainNavigation(entries: MemoryEntry[], observation: Observation, capa
       for (let k: string | null = tileKey(nearest.value); k !== null; k = parents.get(k) ?? null) {
         corridor.push(terrain.get(k)!);
       }
-      const budget = Math.max(0, Math.floor(capacity * 0.75) - chosen.size);
+      // A disconnected prefix cannot route the observer home. Retain a small
+      // anchor instead of sacrificing most of the local search budget.
+      const fraction = recovery && !local.has(start) ? 0.25 : 0.75;
+      const budget = Math.max(0, Math.floor(capacity * fraction) - chosen.size);
       for (const e of corridor.reverse().slice(0, budget)) add(e);
     }
   }
   const near = (a: MemoryEntry, b: MemoryEntry): number =>
     manhattan(a.value, origin) - manhattan(b.value, origin) || compare(a,b);
   const deposits = entries.filter(e => e.value.kind === 'deposit' &&
-    e.value.amount > 0 && e.status !== 'absent').sort(near);
+    e.value.amount > 0 && e.status !== 'absent' && (!recovery || local.has(tileKey(e.value)))).sort(near);
   for (const e of deposits.slice(0, Math.max(1, Math.floor(capacity / 8)))) add(e);
   const visits = entries.filter(e => e.lastVisitedTick !== undefined)
     .sort((a,b) => b.lastVisitedTick! - a.lastVisitedTick! || compare(a,b));
@@ -235,6 +282,7 @@ export class AgentMemory {
   readonly #retention: MemoryRetention;
   #lastObservationTick: number | null = null;
   #entries: readonly MemoryEntry[] = Object.freeze([]);
+  #searchPressure: readonly number[] | undefined;
 
   constructor(observerId: number, capacity = DEFAULT_MEMORY_CAPACITY, retention: MemoryRetention = 'recency') {
     this.#observerId = integer(observerId, 'observer ID', 1);
@@ -278,8 +326,12 @@ export class AgentMemory {
         ? (tileKey(value) === tileKey(observation.observer) ? tick : oldVisits?.get(key(value))) : undefined;
       next.push(entry(value, 'current', tick, tick, visit));
     }
+    const pressure = this.#retention === 'navigation' && searchEnabled(observation, this.capacity)
+      ? updatePressure(this.#searchPressure, observation, this.capacity, this.#lastObservationTick, this.#entries)
+      : undefined;
     this.#entries = Object.freeze(this.#retention === 'navigation'
       ? retainNavigation(next, observation, this.capacity) : next.sort(compare).slice(0, this.capacity));
+    this.#searchPressure = pressure;
     this.#lastObservationTick = tick;
     return this.snapshot();
   }
@@ -307,7 +359,8 @@ export class AgentMemory {
   snapshot(): MemorySnapshot {
     return Object.freeze({ version: 1, observerId: this.observerId, capacity: this.capacity,
       ...(this.#retention === 'navigation' ? { retention: 'navigation' as const } : {}),
-      lastObservationTick: this.#lastObservationTick, entries: this.#entries });
+      lastObservationTick: this.#lastObservationTick, entries: this.#entries,
+      ...(this.#searchPressure === undefined ? {} : { searchPressure: this.#searchPressure }) });
   }
 
   toJSON(): MemorySnapshot { return this.snapshot(); }
@@ -346,6 +399,16 @@ export class AgentMemory {
       }
       keys.add(key(value));
       restored.push(entry(value, status, observed, checked, visit));
+    }
+    if (data.searchPressure !== undefined) {
+      const pressure = array(data.searchPressure);
+      if (memory.#retention !== 'navigation' || memory.capacity < 16 || tick === null ||
+          pressure.length !== Math.min(memory.capacity, 64)) throw new RangeError('Invalid search pressure');
+      memory.#searchPressure = Object.freeze(Array.from(pressure, n => {
+        const value = integer(n, 'search pressure');
+        if (value > 255) throw new RangeError('Invalid search pressure counter');
+        return value;
+      }));
     }
     restored.sort(compare);
     memory.#entries = Object.freeze(restored);
