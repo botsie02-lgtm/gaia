@@ -42,6 +42,7 @@ export function runDiagnostics(input: DiagnosticConfig) {
     memoryCapacity: integer(input.memoryCapacity === undefined ? DEFAULT_MEMORY_CAPACITY : input.memoryCapacity, 'memoryCapacity', 1),
     eventCapacity: integer(input.eventCapacity === undefined ? 1 : input.eventCapacity, 'eventCapacity', 1),
   } as const;
+  if (config.agentMode !== 'legacy' && config.agentMode !== 'knowledge') throw new RangeError('Invalid agentMode');
   const world = createWorld(config.seed, config);
   // Scenario setup only: retain a stable prefix of the generated population.
   // Terrain, deposits, IDs, RNG and retained agents are otherwise unchanged.

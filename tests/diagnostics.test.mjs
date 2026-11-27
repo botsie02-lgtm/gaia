@@ -78,15 +78,24 @@ test('movement, idle, rest and cargo metrics match independent tick samples', ()
   const w = createWorld(config.seed, config); w.agents = w.agents.slice(0, 2);
   const paths = w.agents.map(a => [a.x + ':' + a.y]);
   const observed = new Set();
+  const outcomes = w.agents.map(() => ({ move: 0, harvest: 0, deliver: 0, rest: 0, idle: 0 }));
   for (let i = 0; i < config.ticks; i++) {
+    const before = w.agents.map(a => ({ x: a.x, y: a.y, cargo: a.cargo.wood + a.cargo.stone, rest: a.resting || a.energy <= 12 }));
     stepWorld(w);
     w.agents.forEach((a, j) => {
+      const b = before[j], cargo = a.cargo.wood + a.cargo.stone;
+      const kind = a.x !== b.x || a.y !== b.y ? 'move' : cargo > b.cargo ? 'harvest' : cargo < b.cargo ? 'deliver' : b.rest ? 'rest' : 'idle';
+      outcomes[j][kind]++;
       if (paths[j].at(-1) !== a.x + ':' + a.y) paths[j].push(a.x + ':' + a.y);
       for (const p of a.observation.terrain) observed.add(p.x + ':' + p.y);
     });
   }
   assert.equal(r.coverage.observedTiles, observed.size);
   paths.forEach((p, i) => {
+    assert.deepEqual(r.agents[i].outcomes, outcomes[i]);
+    for (const kind of ['move', 'harvest', 'deliver']) {
+      assert.equal(r.agents[i].intentions[kind], r.agents[i].outcomes[kind] + r.agents[i].rejected[kind]);
+    }
     assert.equal(r.agents[i].movement.distance, p.length - 1);
     assert.equal(r.agents[i].movement.revisits, p.length - new Set(p).size);
     assert.equal(r.agents[i].movement.backtracks, p.filter((v,j) => j >= 2 && v === p[j-2]).length);
@@ -95,7 +104,7 @@ test('movement, idle, rest and cargo metrics match independent tick samples', ()
 
 test('invalid configs fail before running', () => {
   for (const bad of [{ seed: NaN }, { ticks: -1 }, { ticks: 0.5 }, { agentCount: 15 },
-    { agentCount: 0 }, { agentMode: 'other' }, { perceptionRange: -1 }, { memoryCapacity: 0 }, { eventCapacity: 0 }]) {
+    { agentCount: 0 }, { agentMode: 'other' }, { agentMode: null }, { perceptionRange: -1 }, { memoryCapacity: 0 }, { eventCapacity: 0 }]) {
     assert.throws(() => runDiagnostics({ seed: 1, ticks: 0, ...bad }));
   }
 });
@@ -108,13 +117,16 @@ test('legacy does not pretend to have actual observation or intention evidence',
 
 test('representative fixed matrix runs across seeds and publishes compact measured baselines', () => {
   for (const config of baselineScenarios()) {
+    const start = performance.now();
     const r = runDiagnostics(config);
+    const elapsedMs = performance.now() - start;
     const row = { seed: r.config.seed, mode: r.config.agentMode, range: r.config.perceptionRange,
       capacity: r.config.memoryCapacity, harvested: r.harvested, delivered: r.delivered,
       built: r.firstConstructionTick, xp: r.gatheringExperience, visited: r.coverage.visitedTiles,
       observed: r.coverage.observedTiles, moves: r.movement.distance, revisits: r.movement.revisits,
       backtracks: r.movement.backtracks, idle: r.outcomes.idle, memory: r.memory.peakPerAgent };
     console.log('GAIA_BASELINE ' + JSON.stringify(row));
+    console.log('GAIA_TIMING ' + JSON.stringify({ seed: row.seed, mode: row.mode, range: row.range, capacity: row.capacity, elapsedMs }));
     assert.equal(Object.values(r.outcomes).reduce((s,n) => s+n,0), r.config.ticks * r.config.agentCount);
   }
 });
