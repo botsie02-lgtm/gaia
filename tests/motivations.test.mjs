@@ -164,6 +164,8 @@ test('legacy energy rest remains a hard constraint separate from biological desi
   assert.equal(result.desiredGoal, 'obtain-water');
   assert.equal(result.selectedGoal, 'rest');
   assert.equal(result.reason, 'legacy-rest');
+  assert.equal(evaluation(result, 'gather').opportunity, 'not-evaluated');
+  assert.equal(evaluation(result, 'explore').feasibility, 'blocked');
   assert.equal(result.decision.action.kind, 'rest');
 });
 
