@@ -86,3 +86,22 @@ test('zero perception remains an explicitly measured nonproductive scenario', ()
   assert.equal(r.firstConstructionTick, null);
   assert.equal(r.physical.newSamples, 0);
 });
+
+test('no-delivery intervals agree with resolved cargo transitions independently of retained ledger', () => {
+  const c = { seed: 7, ticks: 200, agentCount: 3, agentMode: 'knowledge', perceptionRange: 2, memoryCapacity: 32, resourceMode: 'physical', thermal: true };
+  const r = runDiagnostics(c), w = createWorld(c.seed, c);
+  w.agents = w.agents.slice(0, c.agentCount);
+  let last = null, gap = 0, longest = 0, total = 0;
+  for (let i = 0; i < c.ticks; i++) {
+    const before = w.agents.map(a => a.cargo.wood + a.cargo.stone);
+    stepWorld(w);
+    const delivered = w.agents.reduce((n,a,j) => n + Math.max(0, before[j] - a.cargo.wood - a.cargo.stone), 0);
+    if (delivered > 0) { last = w.tick; gap = 0; total += delivered; }
+    else { gap++; longest = Math.max(longest, gap); }
+  }
+  assert.ok(total > 0);
+  assert.equal(r.delivered.wood + r.delivered.stone, total);
+  assert.equal(r.resources.lastDeliveryTick, last);
+  assert.equal(r.resources.maxNoDeliveryRun, longest);
+  clean(r);
+});

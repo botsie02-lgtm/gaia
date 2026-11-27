@@ -118,3 +118,7 @@ simulation logic. Use repeated fresh processes and warmups for comparisons;
 post-run heap includes other allocations and is not peak heap or memory growth.
 The test matrix also logs external elapsed time separately from the JSON metrics.
 
+
+## Physical and thermal reliability
+
+See [RELIABILITY.md](RELIABILITY.md) for per-tick physical audit metrics, extended workloads, measured baseline and limitations. The original behavioural baseline above is historical.
