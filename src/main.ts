@@ -21,6 +21,7 @@ app.innerHTML = `
       <label>World seed <input id="seed" type="number" value="12345" /></label>
       <label>Agent policy <select id="agent-policy"><option value="knowledge" selected>Knowledge-limited</option><option value="legacy">Legacy</option></select></label>
       <label>Resources <select id="resource-mode"><option value="physical" selected>Physical matter</option><option value="legacy">Legacy units</option></select></label>
+      <label><input id="thermal" type="checkbox" /> Thermal contacts (physical)</label>
       <label><input id="visibility" type="checkbox" /> Selected agent sight</label>
       <button id="reset" class="secondary">Regenerate</button>
     </div>
@@ -54,8 +55,10 @@ const policySelect = get<HTMLSelectElement>('agent-policy');
 const visibility = get<HTMLInputElement>('visibility');
 const resourceSelect = get<HTMLSelectElement>('resource-mode');
 const chosenResourceMode = () => resourceSelect.value === 'legacy' ? 'legacy' as const : 'physical' as const;
+const thermalSelect = get<HTMLInputElement>('thermal');
+const chosenThermal = () => chosenResourceMode() === 'physical' && thermalSelect.checked;
 const chosenMode = () => policySelect.value === 'legacy' ? 'legacy' as const : 'knowledge' as const;
-let world: World = createWorld(12345, { agentMode: chosenMode(), resourceMode: chosenResourceMode() });
+let world: World = createWorld(12345, { agentMode: chosenMode(), resourceMode: chosenResourceMode(), thermal: chosenThermal() });
 let selectedAgentId: number | null = null;
 let running = true;
 let selected: { x: number; y: number } | null = null;
@@ -91,7 +94,7 @@ function physicalLines(kind: OwnerKind, id: number): string[] {
   const mass = samples.reduce((sum, s) => sum + s.massKg, 0);
   return [owner + ': ' + mass.toFixed(3) + ' kg · ' + samples.length + ' samples',
     ...samples.map(s => '  #' + s.sampleId + ' ' + s.materialId + ' ' + s.massKg + ' kg · ' +
-      s.temperatureC + ' °C · ' + s.phase)];
+      s.temperatureC.toFixed(3) + ' °C · ' + s.phase)];
 }
 
 function inspect(): void {
@@ -150,6 +153,13 @@ function render(): void {
     'Once built, the hearth burns wood to generate and lose abstract heat over time.';
   stats.innerHTML = [
     ['Resource mode', world.resourceMode],
+    ['Thermal contacts', world.thermal ? 'Enabled' : 'Disabled'],
+    ...(world.thermal ? [
+      ['Modeled seconds / tick', world.thermal.config.tickDurationSeconds],
+      ['Contact conductance (W/K)', world.thermal.config.conductanceWPerK],
+      ['Contacts / tick budget', world.thermal.config.maxContactsPerTick],
+      ['Event threshold (J)', world.thermal.config.eventThresholdJ],
+    ] : []),
     ['Agents', world.agents.length], ['Average energy', `${average.toFixed(0)} / 100`],
     ['Wood stored', world.inventory.wood], ['Stone stored', world.inventory.stone],
     ['Wood harvested', world.stats.woodHarvested], ['Stone harvested', world.stats.stoneHarvested],
@@ -188,7 +198,7 @@ get<HTMLButtonElement>('step').addEventListener('click', () => {
 function regenerate(): void {
   const seed = Number(seedInput.value);
   if (!Number.isFinite(seed)) { seedInput.value = '12345'; return; }
-  world = createWorld(Math.trunc(seed), { agentMode: chosenMode(), resourceMode: chosenResourceMode() });
+  world = createWorld(Math.trunc(seed), { agentMode: chosenMode(), resourceMode: chosenResourceMode(), thermal: chosenThermal() });
   selectedAgentId = null;
   selected = null;
   inspector.textContent = 'Click a tile to inspect its terrain and entities.';
@@ -197,7 +207,11 @@ function regenerate(): void {
  }
 get<HTMLButtonElement>('reset').addEventListener('click', regenerate);
 policySelect.addEventListener('change', regenerate);
-resourceSelect.addEventListener('change', regenerate);
+resourceSelect.addEventListener('change', () => {
+  thermalSelect.disabled = chosenResourceMode() === 'legacy';
+  regenerate();
+});
+thermalSelect.addEventListener('change', regenerate);
 visibility.addEventListener('change', render);
 canvas.addEventListener('click', (event) => {
   const rect = canvas.getBoundingClientRect();

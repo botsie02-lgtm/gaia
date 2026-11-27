@@ -46,7 +46,10 @@ export interface Hearth extends Position {
   stoneUsed: number;
 }
 
+import type { ThermalState } from './environment/index.js';
+
 export interface World {
+  readonly thermal?: ThermalState;
   readonly resourceMode: ResourceMode;
   readonly physicalConfig: PhysicalResourceConfig | null;
   readonly physicalInventory: PhysicalInventory | null;
